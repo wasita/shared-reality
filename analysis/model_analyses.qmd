@@ -133,30 +133,38 @@ fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
 # --- Panel A: Generalization Gradient ---
 ax = axes[0]
+
+# Color palette (consistent with behavioral figures)
+LOW_COLOR = '#648FFF'   # blue
+HIGH_COLOR = '#DC267F'  # pink
+
 qt_labels = ['Observed', 'Same\nDomain', 'Different\nDomain']
 qt_keys = ['observed', 'same_domain', 'different_domain']
 x = np.arange(len(qt_keys))
-width = 0.35
+width = 0.2
 
-# Human effects
-human_effects = [HUMAN_RATES[(qt, 'high')] - HUMAN_RATES[(qt, 'low')] for qt in qt_keys]
+# Get human rates
+human_low = [HUMAN_RATES[(qt, 'low')] for qt in qt_keys]
+human_high = [HUMAN_RATES[(qt, 'high')] for qt in qt_keys]
 
-# Model effects
-model_effects = []
+# Get model rates
+model_low, model_high = [], []
 for qt in qt_keys:
     qt_preds = main_preds[main_preds['question_type'] == qt]
-    high = qt_preds[qt_preds['match_type'] == 'high']['pred_prob'].mean()
-    low = qt_preds[qt_preds['match_type'] == 'low']['pred_prob'].mean()
-    model_effects.append(high - low)
+    model_high.append(qt_preds[qt_preds['match_type'] == 'high']['pred_prob'].mean())
+    model_low.append(qt_preds[qt_preds['match_type'] == 'low']['pred_prob'].mean())
 
-ax.bar(x - width/2, human_effects, width, label='Human', color='#2ecc71', alpha=0.8)
-ax.bar(x + width/2, model_effects, width, label='Model (k=4)', color='#3498db', alpha=0.8)
+# Plot grouped bars: Human (solid), Model (hatched)
+ax.bar(x - width*1.5, human_low, width, color=LOW_COLOR, alpha=0.8, label='Human')
+ax.bar(x - width*0.5, human_high, width, color=HIGH_COLOR, alpha=0.8)
+ax.bar(x + width*0.5, model_low, width, color=LOW_COLOR, alpha=0.8, hatch='///', edgecolor='white', label='Model')
+ax.bar(x + width*1.5, model_high, width, color=HIGH_COLOR, alpha=0.8, hatch='///', edgecolor='white')
+
 ax.set_xticks(x)
 ax.set_xticklabels(qt_labels)
-ax.set_ylabel('Effect (High - Low Match)')
+ax.set_ylabel('P(predict shared)')
 ax.set_title('A. Generalization Gradient', fontweight='bold')
-ax.legend(frameon=False)
-ax.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
+ax.legend(frameon=False, loc='upper right')
 
 # --- Panel B: Domain-level predictions ---
 ax = axes[1]
