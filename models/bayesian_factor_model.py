@@ -15,7 +15,6 @@ When infer_lambda=True, we jointly infer (λ, θ) by marginalizing over a λ gri
 """
 
 from pathlib import Path
-from dataclasses import dataclass
 from typing import Optional, Dict
 
 import numpy as np
@@ -80,6 +79,7 @@ def _marginal_likelihood(L_obs, r_obs, mu_q_obs, theta_self, lam, Sigma_0, sigma
     return jax_norm.pdf(r_obs, marginal_mean, jnp.sqrt(marginal_var))
 
 
+@jit
 def _predict_with_lambda_inference(
     obs_q, r_partner_obs, r_self_all, L, mu_q,
     Sigma_0, Sigma_0_inv, sigma_obs, tau,
@@ -155,13 +155,6 @@ def load_unified_data() -> pd.DataFrame:
 # ============================================================================
 # MODEL
 # ============================================================================
-
-@dataclass
-class Posterior:
-    """Posterior distribution over partner's factor position."""
-    mean: np.ndarray
-    covariance: np.ndarray
-
 
 class BayesianFactorModel:
     """
@@ -280,38 +273,10 @@ class BayesianFactorModel:
         preds = (1 - self.epsilon) * preds + self.epsilon * 0.5
         return np.asarray(preds)
 
-    # Alias for backward compatibility
-    def predict_participant(self, obs_q: int, r_partner_obs: float, r_self_all: np.ndarray) -> np.ndarray:
-        return self.predict(obs_q, r_partner_obs, r_self_all)
-
     def __repr__(self):
         if self.infer_lambda:
             return f"BayesianFactorModel(k={self.k}, infer_λ=True, ε={self.epsilon})"
         return f"BayesianFactorModel(k={self.k}, λ={self.fixed_lam}, ε={self.epsilon})"
-
-
-# ============================================================================
-# MODEL CONSTRUCTORS (for ablations)
-# ============================================================================
-
-def FullModel(k: int = 4, **kwargs) -> BayesianFactorModel:
-    """Full model with joint inference over (λ, θ)."""
-    return BayesianFactorModel(k=k, infer_lambda=True, **kwargs)
-
-
-def FactorModel(k: int = 4, **kwargs) -> BayesianFactorModel:
-    """Factor model without self-projection (λ=0)."""
-    return BayesianFactorModel(k=k, infer_lambda=False, lam=0.0, **kwargs)
-
-
-def PopulationBaseline(**kwargs) -> BayesianFactorModel:
-    """Population baseline: no structure, no self-projection."""
-    return BayesianFactorModel(k=0, infer_lambda=False, lam=0.0, **kwargs)
-
-
-def EgocentricBaseline(**kwargs) -> BayesianFactorModel:
-    """Egocentric baseline: no structure, full self-projection."""
-    return BayesianFactorModel(k=0, infer_lambda=False, lam=1.0, **kwargs)
 
 
 # ============================================================================
