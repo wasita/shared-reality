@@ -38,18 +38,81 @@ sys.path.insert(0, str(base_dir))
 from models.bayesian_factor_model import (
     BayesianFactorModel,
     load_factor_loadings,
-    load_unified_data,
-    run_evaluation,
-    compute_metrics,
-    DOMAIN_RANGES
+    load_evaluation_data,
+    DOMAIN_RANGES,
+    N_QUESTIONS,
 )
 
 print(f'Project root: {base_dir}')
 ```
 
 ```{python}
+# --- Evaluation utilities (transparent, not hidden in module) ---
+
+def run_evaluation(model, data):
+    """Run model on all participants, return predictions DataFrame."""
+    results = []
+    for pid in data["pid"].unique():
+        subj = data[data["pid"] == pid]
+        matched = subj[subj["is_matched"] == True]
+        if len(matched) == 0:
+            continue
+
+        obs_q = int(matched["matchedIdx"].iloc[0]) - 1
+        r_partner = matched["partner_response"].iloc[0]
+        if pd.isna(r_partner):
+            continue
+
+        r_self = np.zeros(N_QUESTIONS)
+        for _, row in subj.iterrows():
+            r_self[int(row["question"]) - 1] = row["preChatResponse"]
+
+        preds = model.predict(obs_q, float(r_partner), r_self)
+
+        for _, row in subj.iterrows():
+            results.append({
+                "pid": pid,
+                "question": row["question"],
+                "question_domain": row["preChatDomain"],
+                "match_type": matched["match_type"].iloc[0],
+                "question_type": row["question_type"],
+                "pred_prob": preds[int(row["question"]) - 1],
+                "actual": row["participant_binary_prediction"],
+            })
+    return pd.DataFrame(results)
+
+
+def compute_metrics(pred_df, human_rates=None):
+    """Compute evaluation metrics from predictions."""
+    probs = pred_df["pred_prob"].values
+    actual = pred_df["actual"].values
+
+    results = {
+        'log_likelihood': np.sum(actual * np.log(probs + 1e-10) + (1 - actual) * np.log(1 - probs + 1e-10)),
+        'accuracy': np.mean((probs > 0.5) == actual),
+    }
+
+    # Cell-level rates and effects
+    model_rates = {}
+    for qt in ['observed', 'same_domain', 'different_domain']:
+        for mt in ['high', 'low']:
+            cell = pred_df[(pred_df["question_type"] == qt) & (pred_df["match_type"] == mt)]
+            model_rates[(qt, mt)] = cell["pred_prob"].mean() if len(cell) else 0.5
+        results[f'{qt}_effect'] = model_rates[(qt, 'high')] - model_rates[(qt, 'low')]
+
+    results['model_rates'] = model_rates
+
+    if human_rates:
+        m = [model_rates[k] for k in sorted(human_rates.keys())]
+        h = [human_rates[k] for k in sorted(human_rates.keys())]
+        results['correlation'] = float(np.corrcoef(m, h)[0, 1])
+
+    return results
+```
+
+```{python}
 # Load behavioral data
-data = load_unified_data()
+data = load_evaluation_data()
 print(f'Loaded {len(data)} observations from {data["pid"].nunique()} participants')
 
 # Compute human rates from data (not hard-coded)
@@ -379,7 +442,6 @@ for k_val in k_values:
         'same_effect': metrics['same_domain_effect'],
         'diff_effect': metrics['different_domain_effect'],
         'gradient': metrics['same_domain_effect'] - metrics['different_domain_effect'],
-        'effect_error': metrics['total_effect_error'],
         'log_likelihood': metrics['log_likelihood'],
         'accuracy': metrics['accuracy'],
     })
@@ -423,8 +485,9 @@ ax1.set_xlim(-0.5, max(k) + 3)
 ax1.set_ylim(-0.02, 0.18)
 ax1.axhline(0, color='gray', linewidth=0.5, alpha=0.5)
 
-# Highlight optimal k
-best_k = k_sweep.loc[k_sweep['effect_error'].idxmin(), 'k']
+# Highlight optimal k (closest gradient to human)
+k_sweep['gradient_error'] = abs(k_sweep['gradient'] - HUMAN_GRADIENT)
+best_k = k_sweep.loc[k_sweep['gradient_error'].idxmin(), 'k']
 ax1.axvline(best_k, color='gray', linestyle=':', alpha=0.5)
 ax1.text(best_k, ax1.get_ylim()[1] * 0.95, f'k={int(best_k)}', ha='center', fontsize=9, color='gray')
 

@@ -21,7 +21,7 @@ self's position. When infer_lambda=True, we marginalize over λ using Bayes rule
 """
 
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -271,73 +271,3 @@ class BayesianFactorModel:
         return f"BayesianFactorModel(k={self.k}, λ={self._fixed_lam})"
 
 
-# =============================================================================
-# EVALUATION
-# =============================================================================
-
-def run_evaluation(model, data: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-    """Run model on all participants, return predictions."""
-    if data is None:
-        data = load_evaluation_data()
-
-    results = []
-    for pid in data["pid"].unique():
-        subj = data[data["pid"] == pid]
-        matched = subj[subj["is_matched"] == True]
-
-        if len(matched) == 0:
-            continue
-
-        obs_q = int(matched["matchedIdx"].iloc[0]) - 1  # 0-indexed
-        r_partner = matched["partner_response"].iloc[0]
-        if pd.isna(r_partner):
-            continue
-
-        # Build response vector
-        r_self = np.zeros(N_QUESTIONS)
-        for _, row in subj.iterrows():
-            r_self[int(row["question"]) - 1] = row["preChatResponse"]
-
-        preds = model.predict(obs_q, float(r_partner), r_self)
-
-        for _, row in subj.iterrows():
-            results.append({
-                "pid": pid,
-                "question": row["question"],
-                "question_domain": row["preChatDomain"],
-                "match_type": matched["match_type"].iloc[0],
-                "question_type": row["question_type"],
-                "pred_prob": preds[int(row["question"]) - 1],
-                "actual": row["participant_binary_prediction"],
-            })
-
-    return pd.DataFrame(results)
-
-
-def compute_metrics(pred_df: pd.DataFrame, human_rates: Optional[Dict] = None) -> Dict:
-    """Compute evaluation metrics."""
-    probs = pred_df["pred_prob"].values
-    actual = pred_df["actual"].values
-
-    results = {
-        'log_likelihood': np.sum(actual * np.log(probs + 1e-10) + (1 - actual) * np.log(1 - probs + 1e-10)),
-        'accuracy': np.mean((probs > 0.5) == actual),
-        'brier': np.mean((probs - actual) ** 2),
-    }
-
-    # Cell-level rates and effects
-    model_rates = {}
-    for qt in ['observed', 'same_domain', 'different_domain']:
-        for mt in ['high', 'low']:
-            cell = pred_df[(pred_df["question_type"] == qt) & (pred_df["match_type"] == mt)]
-            model_rates[(qt, mt)] = cell["pred_prob"].mean() if len(cell) else 0.5
-        results[f'{qt}_effect'] = model_rates[(qt, 'high')] - model_rates[(qt, 'low')]
-
-    results['model_rates'] = model_rates
-
-    if human_rates:
-        m = [model_rates[k] for k in sorted(human_rates.keys())]
-        h = [human_rates[k] for k in sorted(human_rates.keys())]
-        results['correlation'] = float(np.corrcoef(m, h)[0, 1])
-
-    return results
