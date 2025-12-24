@@ -16,7 +16,7 @@ When infer_lambda=True, we jointly infer (λ, θ) by marginalizing over a λ gri
 
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict
 
 import numpy as np
 import pandas as pd
@@ -312,50 +312,6 @@ def PopulationBaseline(**kwargs) -> BayesianFactorModel:
 def EgocentricBaseline(**kwargs) -> BayesianFactorModel:
     """Egocentric baseline: no structure, full self-projection."""
     return BayesianFactorModel(k=0, infer_lambda=False, lam=1.0, **kwargs)
-
-
-# ============================================================================
-# FACTOR COHESION ANALYSIS
-# ============================================================================
-
-def compute_domain_cohesion(loadings: np.ndarray) -> Dict[str, float]:
-    """
-    Compute factor cohesion for each domain.
-
-    Uses 'primary_factor' method: proportion of variance on strongest factor.
-    This predicts human transfer effects (r = 0.87).
-    """
-    cohesion = {}
-    for domain, (start, end) in DOMAIN_RANGES.items():
-        domain_L = loadings[start:end]
-        max_loadings = np.abs(domain_L).max(axis=1)
-        total_var = (domain_L ** 2).sum(axis=1)
-        cohesion[domain] = (max_loadings ** 2 / total_var).mean()
-    return cohesion
-
-
-def compute_cohesion_transfer_correlation(loadings: np.ndarray, pred_df: pd.DataFrame) -> Tuple[float, pd.DataFrame]:
-    """Compute correlation between factor cohesion and domain-specific transfer."""
-    cohesion = compute_domain_cohesion(loadings)
-
-    domain_effects = {}
-    for domain in DOMAIN_RANGES.keys():
-        same_domain = pred_df[
-            (pred_df["question_type"] == "same_domain") &
-            (pred_df["question_domain"].str.lower() == domain)
-        ]
-        if len(same_domain) > 0:
-            high = same_domain[same_domain["match_type"] == "high"]["actual"].mean()
-            low = same_domain[same_domain["match_type"] == "low"]["actual"].mean()
-            domain_effects[domain] = high - low
-
-    summary = pd.DataFrame([
-        {'domain': d, 'cohesion': cohesion[d], 'transfer_effect': domain_effects.get(d, np.nan)}
-        for d in DOMAIN_RANGES.keys()
-    ]).dropna()
-
-    r = np.corrcoef(summary['cohesion'], summary['transfer_effect'])[0, 1]
-    return r, summary
 
 
 # ============================================================================
