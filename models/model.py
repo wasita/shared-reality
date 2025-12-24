@@ -1,0 +1,519 @@
+"""
+Commonality Inference Model.
+
+Predicts how observing a partner's response on one question informs beliefs
+about their responses on other questions. The model combines two mechanisms:
+
+1. BAYESIAN FACTOR MODEL (λ=0): Uses population-level factor structure.
+   Transfer emerges from the geometry of factor loadings—questions that load
+   on similar factors show correlated predictions.
+
+2. EGOCENTRIC HEURISTIC (λ=1): Uses self-response similarity.
+   "If I answered similarly on X and Y, partner will too."
+
+The mixture parameter λ ∈ [0,1] blends between these:
+    P(match) = (1-λ) × Bayesian + λ × Egocentric
+
+BAYESIAN COMPONENT
+==================
+Partner's latent position:  θ ∈ Rᵏ
+Factor loadings:            Λ ∈ R^{35 × k}
+Question means:             μ ∈ R^35
+
+Prior:      θ ~ N(0, σ²_prior·I)
+Likelihood: r | θ ~ N(Λθ + μ, σ²_obs·I)
+Posterior:  θ | r_obs ∝ Likelihood × Prior  (closed-form Gaussian)
+
+EGOCENTRIC COMPONENT
+====================
+P(match on q) ∝ similarity(r_self[q], r_self[observed])
+Modulated by whether the observed response was a match.
+"""
+
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+import jax
+import jax.numpy as jnp
+from jax import jit, vmap
+from jax.scipy.stats import norm as jax_norm
+
+jax.config.update("jax_platform_name", "cpu")
+
+
+# Paths
+DATA_DIR = Path(__file__).parent.parent / "data"
+N_QUESTIONS = 35
+
+# Domain structure (for evaluation)
+DOMAIN_RANGES = {
+    'arbitrary': (0, 5), 'background': (5, 10), 'identity': (10, 15),
+    'morality': (15, 20), 'politics': (20, 25), 'preferences': (25, 30),
+    'religion': (30, 35),
+}
+
+
+# =============================================================================
+# INFERENCE (JAX-accelerated)
+# =============================================================================
+
+@jit
+def _project_to_factors(responses, loadings, means):
+    """Project responses onto factor space via least-squares: θ = (Λ'Λ)⁻¹Λ'(r - μ)"""
+    centered = responses - means
+    LtL_inv = jnp.linalg.inv(loadings.T @ loadings + 1e-6 * jnp.eye(loadings.shape[1]))
+    return LtL_inv @ loadings.T @ centered
+
+
+@jit
+def _posterior_update(L_obs, r_obs, mu_obs, prior_mean, prior_precision, obs_variance):
+    """
+    Bayesian update: P(θ | r_obs) ∝ P(r_obs | θ) P(θ)
+
+    Returns posterior mean and covariance.
+    """
+    r_centered = r_obs - mu_obs
+    obs_precision = jnp.outer(L_obs, L_obs) / obs_variance
+    post_precision = prior_precision + obs_precision
+    post_cov = jnp.linalg.inv(post_precision)
+    post_mean = post_cov @ (prior_precision @ prior_mean + L_obs * r_centered / obs_variance)
+    return post_mean, post_cov
+
+
+@jit
+def _predict_match_probs(loadings, means, post_mean, post_cov, r_self, threshold, obs_variance):
+    """
+    Predict P(|r_partner - r_self| ≤ τ) for each question.
+
+    Predictive distribution: r_q ~ N(Λ_q'θ + μ_q, Λ_q'Σ_post Λ_q + σ²)
+    """
+    pred_means = loadings @ post_mean + means
+    pred_vars = jnp.sum((loadings @ post_cov) * loadings, axis=1) + obs_variance
+    pred_stds = jnp.sqrt(pred_vars)
+
+    upper = (r_self + threshold - pred_means) / pred_stds
+    lower = (r_self - threshold - pred_means) / pred_stds
+    return jnp.clip(jax_norm.cdf(upper) - jax_norm.cdf(lower), 0.0, 1.0)
+
+
+@jit
+def _predict_bayesian(
+    obs_q, r_obs, r_self, loadings, means,
+    prior_cov, prior_precision, obs_variance, threshold
+):
+    """Bayesian factor model prediction for a single participant."""
+    L_obs = loadings[obs_q]
+    mu_obs = means[obs_q]
+
+    # Prior mean is 0 (population average)
+    prior_mean = jnp.zeros(loadings.shape[1])
+
+    # Bayesian update
+    post_mean, post_cov = _posterior_update(
+        L_obs, r_obs, mu_obs, prior_mean, prior_precision, obs_variance
+    )
+
+    return _predict_match_probs(
+        loadings, means, post_mean, post_cov, r_self, threshold, obs_variance
+    )
+
+
+@jit
+def _predict_egocentric(obs_q, r_obs, r_self, threshold):
+    """
+    Egocentric heuristic prediction.
+
+    P(match on q) based on:
+    1. Self-similarity: how similar is r_self[q] to r_self[obs_q]
+    2. Match signal: did the observed response match?
+    """
+    # Self-similarity: inverse of absolute difference, normalized to [0, 1]
+    r_self_obs = r_self[obs_q]
+    self_diff = jnp.abs(r_self - r_self_obs)
+    similarity = 1.0 / (1.0 + self_diff)  # Range ~[0.2, 1.0]
+
+    # Did the observed response match?
+    obs_match = jnp.abs(r_obs - r_self_obs) <= threshold
+
+    # Prediction: base rate + modulation by similarity and match
+    # If match observed: boost similar questions
+    # If mismatch observed: penalize similar questions
+    base = 0.5
+    modulation = jnp.where(obs_match, 0.4 * similarity, -0.2 * similarity)
+
+    return jnp.clip(base + modulation, 0.1, 0.9)
+
+
+@jit
+def _predict_single(
+    obs_q, r_obs, r_self, loadings, means,
+    prior_cov, prior_precision, obs_variance, threshold, lam
+):
+    """Combined prediction: (1-λ) × Bayesian + λ × Egocentric."""
+    p_bayes = _predict_bayesian(
+        obs_q, r_obs, r_self, loadings, means,
+        prior_cov, prior_precision, obs_variance, threshold
+    )
+    p_ego = _predict_egocentric(obs_q, r_obs, r_self, threshold)
+
+    return (1 - lam) * p_bayes + lam * p_ego
+
+
+@jit
+def _predict_batch(
+    obs_qs, r_partners, r_selves, loadings, means,
+    prior_cov, prior_precision, obs_variance, threshold, lam
+):
+    """Batch prediction over participants using vmap."""
+    return vmap(
+        lambda oq, rp, rs: _predict_single(
+            oq, rp, rs, loadings, means,
+            prior_cov, prior_precision, obs_variance, threshold, lam
+        )
+    )(obs_qs, r_partners, r_selves)
+
+
+# =============================================================================
+# DATA LOADING
+# =============================================================================
+
+def load_responses() -> pd.DataFrame:
+    """Load response matrix (participants × 35 questions)."""
+    df = pd.read_csv(DATA_DIR / "responses.csv", low_memory=False)
+    return df.pivot_table(index='pid', columns='question', values='preChatResponse', aggfunc='first')
+
+
+def load_correlation_matrix() -> np.ndarray:
+    """Compute 35×35 correlation matrix from responses."""
+    return np.corrcoef(load_responses().values.T)
+
+
+def load_factor_loadings(k: Optional[int] = None) -> np.ndarray:
+    """Compute factor loadings via eigendecomposition: Λ = V·√eigenvalues."""
+    eigvals, eigvecs = np.linalg.eigh(load_correlation_matrix())
+    idx = np.argsort(eigvals)[::-1]
+    loadings = eigvecs[:, idx] * np.sqrt(np.maximum(eigvals[idx], 0))
+    return loadings[:, :k] if k else loadings
+
+
+def load_question_means() -> np.ndarray:
+    """Population mean for each question."""
+    return load_responses().values.mean(axis=0)
+
+
+def load_evaluation_data() -> pd.DataFrame:
+    """Load data for model evaluation."""
+    return pd.read_csv(DATA_DIR / "responses.csv", low_memory=False)
+
+
+# =============================================================================
+# MODEL
+# =============================================================================
+
+class CommonalityModel:
+    """
+    Commonality inference model combining Bayesian factor structure and
+    egocentric heuristics.
+
+    The mixture parameter λ controls the blend:
+        P(match) = (1-λ) × Bayesian + λ × Egocentric
+
+    - λ=0: Pure Bayesian factor model (uses population structure)
+    - λ=1: Pure egocentric heuristic (uses self-similarity)
+
+    Parameters
+    ----------
+    k : int
+        Number of factors for Bayesian component (default 5)
+    lam : float
+        Mixture weight λ ∈ [0,1]. 0 = Bayesian, 1 = egocentric.
+    sigma_obs, sigma_prior : float
+        Observation and prior noise standard deviations
+    match_threshold : float
+        τ for defining a "match" (|r_partner - r_self| ≤ τ)
+    epsilon : float
+        Lapse rate (probability of random response)
+    loadings : np.ndarray, optional
+        Custom factor loadings (35 x k). If None, computed from data.
+    question_means : np.ndarray, optional
+        Custom question means (35,). If None, computed from data.
+    """
+
+    def __init__(
+        self,
+        k: int = 5,
+        lam: float = 0.0,
+        sigma_obs: float = 0.3,
+        sigma_prior: float = 2.0,
+        match_threshold: float = 1.5,
+        epsilon: float = 0.2,
+        loadings: Optional[np.ndarray] = None,
+        question_means: Optional[np.ndarray] = None,
+    ):
+        self.k = k
+        self.lam = np.clip(lam, 0.0, 1.0)
+        self.epsilon = np.clip(epsilon, 0.0, 1.0)
+
+        # Load data
+        means = question_means if question_means is not None else load_question_means()
+        if k == 0:
+            L = np.ones((N_QUESTIONS, 1))  # Flat: all questions identical
+        elif loadings is not None:
+            L = loadings[:, :k] if loadings.shape[1] > k else loadings
+        else:
+            L = load_factor_loadings(k)
+
+        k_eff = L.shape[1]
+
+        # Cache as JAX arrays
+        self._loadings = jnp.array(L)
+        self._means = jnp.array(means)
+        self._prior_cov = jnp.array(sigma_prior**2 * np.eye(k_eff))
+        self._prior_precision = jnp.array(np.eye(k_eff) / sigma_prior**2)
+        self._obs_variance = sigma_obs**2
+        self._threshold = match_threshold
+        self._lam = jnp.array(self.lam)
+
+    def predict(self, obs_q: int, r_partner: float, r_self: np.ndarray) -> np.ndarray:
+        """
+        Predict P(match) for all questions given one observation.
+
+        Args:
+            obs_q: Which question was observed (0-indexed)
+            r_partner: Partner's response on that question
+            r_self: Self's responses on all 35 questions
+
+        Returns:
+            35-element array of match probabilities
+        """
+        preds = _predict_single(
+            obs_q, r_partner, jnp.array(r_self),
+            self._loadings, self._means,
+            self._prior_cov, self._prior_precision, self._obs_variance,
+            self._threshold, self._lam
+        )
+        # Apply lapse rate
+        preds = (1 - self.epsilon) * preds + self.epsilon * 0.5
+        return np.asarray(preds)
+
+    def predict_batch(self, obs_qs: np.ndarray, r_partners: np.ndarray,
+                      r_selves: np.ndarray) -> np.ndarray:
+        """
+        Vectorized prediction for multiple participants.
+
+        Args:
+            obs_qs: (N,) array of observed question indices
+            r_partners: (N,) array of partner responses
+            r_selves: (N, 35) array of self responses
+
+        Returns:
+            (N, 35) array of match probabilities
+        """
+        preds = _predict_batch(
+            jnp.array(obs_qs),
+            jnp.array(r_partners),
+            jnp.array(r_selves),
+            self._loadings, self._means,
+            self._prior_cov, self._prior_precision, self._obs_variance,
+            self._threshold, self._lam
+        )
+        # Apply lapse rate
+        preds = (1 - self.epsilon) * preds + self.epsilon * 0.5
+        return np.asarray(preds)
+
+    def __repr__(self):
+        if self.lam == 0:
+            return f"CommonalityModel(k={self.k}, Bayesian)"
+        elif self.lam == 1:
+            return f"CommonalityModel(Egocentric)"
+        return f"CommonalityModel(k={self.k}, λ={self.lam:.2f})"
+
+
+# =============================================================================
+# FAST EVALUATION (for parameter fitting)
+# =============================================================================
+
+def prepare_evaluation_data(data: pd.DataFrame) -> dict:
+    """
+    Pre-compute arrays for fast batch evaluation.
+
+    Returns dict with arrays ready for predict_batch.
+
+    For the observed response (r_partner), we use:
+    - Chat condition: postChatResponse (listener's perception of partner's response)
+    - No-chat condition: partner_response (ground truth, directly observed)
+
+    This is cognitively correct: the Bayesian update is based on what the
+    listener believes they observed, not ground truth.
+    """
+    obs_qs, r_partners, r_selves = [], [], []
+    participant_info = []  # (pid, question, domain, match_type, question_type, actual)
+
+    for pid in data["pid"].unique():
+        subj = data[data["pid"] == pid]
+        matched = subj[subj["is_matched"] == True]
+        if len(matched) == 0:
+            continue
+
+        obs_q = int(matched["matchedIdx"].iloc[0]) - 1
+
+        # Use perceived response for chat, ground truth for no-chat
+        experiment = subj["experiment"].iloc[0]
+        if experiment == "chat":
+            # Listener's perception of partner's response (from observed question row)
+            obs_row = subj[subj["question_type"] == "observed"]
+            if len(obs_row) == 0:
+                continue
+            r_partner = obs_row["postChatResponse"].iloc[0]
+        else:
+            # No-chat: direct observation, so use ground truth
+            r_partner = matched["partner_response"].iloc[0]
+
+        if pd.isna(r_partner):
+            continue
+
+        r_self = np.zeros(N_QUESTIONS)
+        for _, row in subj.iterrows():
+            r_self[int(row["question"]) - 1] = row["preChatResponse"]
+
+        obs_qs.append(obs_q)
+        r_partners.append(float(r_partner))
+        r_selves.append(r_self)
+
+        for _, row in subj.iterrows():
+            participant_info.append({
+                "pid": pid,  # Actual participant ID (for bootstrapping)
+                "pid_idx": len(obs_qs) - 1,  # Index into batch arrays
+                "question": int(row["question"]) - 1,
+                "question_domain": row["preChatDomain"],
+                "match_type": matched["match_type"].iloc[0],
+                "question_type": row["question_type"],
+                "actual": row["participant_binary_prediction"],
+            })
+
+    return {
+        "obs_qs": np.array(obs_qs),
+        "r_partners": np.array(r_partners),
+        "r_selves": np.array(r_selves),
+        "info": pd.DataFrame(participant_info),
+    }
+
+
+def compute_gradient_error(pred_df: pd.DataFrame, human_rates: dict) -> float:
+    """
+    Compute gradient error (deviation from human transfer effects).
+
+    This is the metric minimized during parameter fitting.
+    """
+    model_rates = {}
+    for qt in ['same_domain', 'different_domain']:
+        for mt in ['high', 'low']:
+            cell = pred_df[(pred_df["question_type"] == qt) & (pred_df["match_type"] == mt)]
+            model_rates[(qt, mt)] = cell["pred_prob"].mean() if len(cell) else 0.5
+
+    model_gradient = (model_rates[('same_domain', 'high')] - model_rates[('same_domain', 'low')]) - \
+                     (model_rates[('different_domain', 'high')] - model_rates[('different_domain', 'low')])
+
+    human_gradient = (human_rates[('same_domain', 'high')] - human_rates[('same_domain', 'low')]) - \
+                     (human_rates[('different_domain', 'high')] - human_rates[('different_domain', 'low')])
+
+    return abs(model_gradient - human_gradient)
+
+
+def fit_parameters(
+    k: int,
+    eval_data: dict,
+    human_rates: dict,
+    infer_lambda: bool = True,
+    fixed_lam: float = 0.0,
+    param_grid: dict = None,
+) -> tuple[dict, dict]:
+    """
+    Grid search for best model parameters at given k.
+
+    Minimizes gradient error (deviation from human transfer effects).
+
+    Args:
+        k: Number of factors
+        eval_data: Output of prepare_evaluation_data()
+        human_rates: Dict of human rates {(question_type, match_type): rate}
+        infer_lambda: Whether to infer λ from data
+        fixed_lam: Fixed λ value when infer_lambda=False
+        param_grid: Override default parameter grid
+
+    Returns:
+        (best_params, best_metrics) tuple
+    """
+    from itertools import product as iterproduct
+
+    if param_grid is None:
+        param_grid = {
+            'sigma_obs': [0.2, 0.3, 0.4, 0.5],
+            'sigma_prior': [1.0, 1.5, 2.0, 3.0],
+            'match_threshold': [1.0, 1.5, 2.0],
+            'epsilon': [0.1, 0.2, 0.3, 0.4],
+        }
+
+    best_error = float('inf')
+    best_params = None
+    best_metrics = None
+
+    for so, sp, mt, eps in iterproduct(
+        param_grid['sigma_obs'], param_grid['sigma_prior'],
+        param_grid['match_threshold'], param_grid['epsilon']
+    ):
+        model = CommonalityModel(
+            k=k, infer_lambda=infer_lambda, lam=fixed_lam,
+            sigma_obs=so, sigma_prior=sp, match_threshold=mt, epsilon=eps
+        )
+        pred_df = fast_evaluate(model, eval_data)
+        error = compute_gradient_error(pred_df, human_rates)
+
+        if error < best_error:
+            best_error = error
+            best_params = {
+                'sigma_obs': so, 'sigma_prior': sp,
+                'match_threshold': mt, 'epsilon': eps
+            }
+            # Compute full metrics for best model
+            probs = np.clip(pred_df["pred_prob"].values, 1e-10, 1-1e-10)
+            actual = pred_df["actual"].values
+            best_metrics = {
+                'gradient_error': error,
+                'log_likelihood': float(np.sum(actual * np.log(probs) + (1 - actual) * np.log(1 - probs))),
+                'accuracy': float(np.mean((probs > 0.5) == actual)),
+            }
+
+    return best_params, best_metrics
+
+
+def fast_evaluate(model: CommonalityModel, eval_data: dict) -> pd.DataFrame:
+    """
+    Fast evaluation using batched predictions.
+
+    Args:
+        model: CommonalityModel instance
+        eval_data: Output of prepare_evaluation_data()
+
+    Returns:
+        DataFrame with predictions
+    """
+    # Batch predict all participants at once
+    all_preds = model.predict_batch(
+        eval_data["obs_qs"],
+        eval_data["r_partners"],
+        eval_data["r_selves"]
+    )
+
+    # Map predictions back using numpy indexing (fast)
+    info = eval_data["info"].copy()
+    info["pred_prob"] = all_preds[
+        info["pid_idx"].values,
+        info["question"].values
+    ]
+
+    return info
+
+
