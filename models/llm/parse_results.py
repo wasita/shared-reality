@@ -181,17 +181,24 @@ def compute_chat_timecourse_accuracy(results: list) -> pd.DataFrame:
     Returns:
         DataFrame with accuracy by time_bin, match_type, question_category
     """
-    # Load ground truth and metadata
-    timecourse = pd.read_csv(DATA_DIR / "15s-binned-complete-timecourse.csv")
+    # Load raw chat messages and derive group metadata
+    messages = pd.read_csv(DATA_DIR / "all-match-chat-messages.csv")
     questions = load_questions()
 
-    # Build group_id -> metadata map
+    # Build group_id -> metadata map from chat messages
     group_meta = {}
-    for _, row in timecourse.drop_duplicates('group_id').iterrows():
-        group_meta[row['group_id']] = {
-            'cat_pid': row['cat_pid'],
-            'dog_pid': row['dog_pid'],
-            'match_type': row['match_type'],
+    for group_id in messages['group_id'].unique():
+        group_msgs = messages[messages['group_id'] == group_id]
+        cat_msgs = group_msgs[group_msgs['author'] == '🐱']
+        dog_msgs = group_msgs[group_msgs['author'] == '🐶']
+
+        if len(cat_msgs) == 0 or len(dog_msgs) == 0:
+            continue
+
+        group_meta[group_id] = {
+            'cat_pid': cat_msgs['prolific_id'].iloc[0],
+            'dog_pid': dog_msgs['prolific_id'].iloc[0],
+            'match_type': group_msgs['match_type'].iloc[0],
         }
 
     # Load ground truth responses

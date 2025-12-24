@@ -363,13 +363,34 @@ Model performance as a function of factor dimensionality k.
 
 import matplotlib.gridspec as gridspec
 
-# Load pre-computed k-sweep results
-k_sweep = pd.read_csv(base_dir / 'data' / 'k_sweep.csv')
+# Compute k-sweep (evaluates model at different factor dimensionalities)
+k_values = [0, 1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 25, 30, 35]
+k_sweep_results = []
 
-# Human targets
-HUMAN_SAME = 0.143
-HUMAN_DIFF = 0.046
-HUMAN_GRADIENT = 0.097
+print('Computing k-sweep...')
+for k_val in k_values:
+    model = UnifiedBayesianModel(k=k_val, sigma_obs=0.3, sigma_prior=2.0,
+                                  match_threshold=1.5, epsilon=0.4, infer_lambda=True)
+    pred_df = run_evaluation(model, data)
+    metrics = compute_metrics(pred_df, human_rates=HUMAN_RATES)
+
+    k_sweep_results.append({
+        'k': k_val,
+        'same_effect': metrics['same_domain_effect'],
+        'diff_effect': metrics['different_domain_effect'],
+        'gradient': metrics['same_domain_effect'] - metrics['different_domain_effect'],
+        'effect_error': metrics['total_effect_error'],
+        'log_likelihood': metrics['log_likelihood'],
+        'accuracy': metrics['accuracy'],
+    })
+    print(f'  k={k_val}: gradient={k_sweep_results[-1]["gradient"]:.3f}')
+
+k_sweep = pd.DataFrame(k_sweep_results)
+
+# Human targets (computed from data above)
+HUMAN_SAME = HUMAN_RATES[('same_domain', 'high')] - HUMAN_RATES[('same_domain', 'low')]
+HUMAN_DIFF = HUMAN_RATES[('different_domain', 'high')] - HUMAN_RATES[('different_domain', 'low')]
+HUMAN_GRADIENT = HUMAN_SAME - HUMAN_DIFF
 
 fig = plt.figure(figsize=(10, 4))
 gs = gridspec.GridSpec(1, 2, width_ratios=[1.2, 1], wspace=0.3)
