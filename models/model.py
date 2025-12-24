@@ -14,8 +14,8 @@ about their responses on other questions. The model combines two mechanisms:
    - Local self-response similarity for question-specific transfer
    Gradients emerge from the structure of one's OWN beliefs, not population statistics.
 
-The mixture parameter β ∈ [0,1] blends between these:
-    P(match) = (1-β) × Bayesian + β × SimilarityProjection
+The mixture parameter λ ∈ [0,1] blends between these:
+    P(match) = (1-λ) × Bayesian + λ × SimilarityProjection
 
 BAYESIAN COMPONENT
 ==================
@@ -180,30 +180,30 @@ def _predict_similarity_projection(obs_q, r_obs, r_self, base_rate, projection_w
 def _predict_single(
     obs_q, r_obs, r_self, loadings, means,
     prior_cov, prior_precision, obs_variance, threshold,
-    beta, base_rate, projection_weight
+    lambda_mix, base_rate, projection_weight
 ):
-    """Combined prediction: (1-β) × Bayesian + β × SimilarityProjection."""
+    """Combined prediction: (1-λ) × Bayesian + λ × SimilarityProjection."""
     p_bayes = _predict_bayesian(
         obs_q, r_obs, r_self, loadings, means,
         prior_cov, prior_precision, obs_variance, threshold
     )
     p_proj = _predict_similarity_projection(obs_q, r_obs, r_self, base_rate, projection_weight, threshold)
 
-    return (1 - beta) * p_bayes + beta * p_proj
+    return (1 - lambda_mix) * p_bayes + lambda_mix * p_proj
 
 
 @jit
 def _predict_batch(
     obs_qs, r_partners, r_selves, loadings, means,
     prior_cov, prior_precision, obs_variance, threshold,
-    beta, base_rate, projection_weight
+    lambda_mix, base_rate, projection_weight
 ):
     """Batch prediction over participants using vmap."""
     return vmap(
         lambda oq, rp, rs: _predict_single(
             oq, rp, rs, loadings, means,
             prior_cov, prior_precision, obs_variance, threshold,
-            beta, base_rate, projection_weight
+            lambda_mix, base_rate, projection_weight
         )
     )(obs_qs, r_partners, r_selves)
 
@@ -250,11 +250,11 @@ class CommonalityModel:
     Commonality inference model combining Bayesian factor structure and
     similarity-modulated projection (Ames 2004; Tamir & Mitchell 2013).
 
-    The mixture parameter β controls the blend:
-        P(match) = (1-β) × Bayesian + β × SimilarityProjection
+    The mixture parameter λ controls the blend:
+        P(match) = (1-λ) × Bayesian + λ × SimilarityProjection
 
-    - β=0: Pure Bayesian factor model (uses population structure)
-    - β=1: Pure similarity projection (uniform projection based on observed agreement)
+    - λ=0: Pure Bayesian factor model (uses population structure)
+    - λ=1: Pure similarity projection (uniform projection based on observed agreement)
 
     The Bayesian model predicts domain-specific gradients from factor structure.
     Similarity projection predicts UNIFORM shifts (no gradient) because
@@ -264,8 +264,8 @@ class CommonalityModel:
     ----------
     k : int
         Number of factors for Bayesian component (default 5)
-    beta : float
-        Mixture weight β ∈ [0,1]. 0 = Bayesian, 1 = similarity projection.
+    lambda_mix : float
+        Mixture weight λ ∈ [0,1]. 0 = Bayesian, 1 = similarity projection.
     sigma_obs, sigma_prior : float
         Observation and prior noise standard deviations (Bayesian model)
     match_threshold : float
@@ -285,7 +285,7 @@ class CommonalityModel:
     def __init__(
         self,
         k: int = 5,
-        beta: float = 0.0,
+        lambda_mix: float = 0.0,
         sigma_obs: float = 0.3,
         sigma_prior: float = 2.0,
         match_threshold: float = 1.5,
@@ -296,7 +296,7 @@ class CommonalityModel:
         question_means: Optional[np.ndarray] = None,
     ):
         self.k = k
-        self.beta = np.clip(beta, 0.0, 1.0)
+        self.lambda_mix = np.clip(lambda_mix, 0.0, 1.0)
         self.epsilon = np.clip(epsilon, 0.0, 1.0)
         self.base_rate = base_rate
         self.projection_weight = projection_weight
@@ -319,7 +319,7 @@ class CommonalityModel:
         self._prior_precision = jnp.array(np.eye(k_eff) / sigma_prior**2)
         self._obs_variance = sigma_obs**2
         self._threshold = match_threshold
-        self._beta = jnp.array(self.beta)
+        self._lambda_mix = jnp.array(self.lambda_mix)
         self._base_rate = jnp.array(base_rate)
         self._projection_weight = jnp.array(projection_weight)
 
@@ -339,7 +339,7 @@ class CommonalityModel:
             obs_q, r_partner, jnp.array(r_self),
             self._loadings, self._means,
             self._prior_cov, self._prior_precision, self._obs_variance,
-            self._threshold, self._beta,
+            self._threshold, self._lambda_mix,
             self._base_rate, self._projection_weight
         )
         # Apply lapse rate
@@ -365,7 +365,7 @@ class CommonalityModel:
             jnp.array(r_selves),
             self._loadings, self._means,
             self._prior_cov, self._prior_precision, self._obs_variance,
-            self._threshold, self._beta,
+            self._threshold, self._lambda_mix,
             self._base_rate, self._projection_weight
         )
         # Apply lapse rate
@@ -373,11 +373,11 @@ class CommonalityModel:
         return np.asarray(preds)
 
     def __repr__(self):
-        if self.beta == 0:
+        if self.lambda_mix == 0:
             return f"CommonalityModel(k={self.k}, Bayesian)"
-        elif self.beta == 1:
+        elif self.lambda_mix == 1:
             return f"CommonalityModel(SimilarityProjection)"
-        return f"CommonalityModel(k={self.k}, β={self.beta:.2f})"
+        return f"CommonalityModel(k={self.k}, λ={self.lambda_mix:.2f})"
 
 
 # =============================================================================
@@ -475,7 +475,7 @@ def fit_parameters(
     k: int,
     eval_data: dict,
     human_rates: dict,
-    beta: float = 0.0,
+    lambda_mix: float = 0.0,
     param_grid: dict = None,
 ) -> tuple[dict, dict]:
     """
@@ -487,7 +487,7 @@ def fit_parameters(
         k: Number of factors
         eval_data: Output of prepare_evaluation_data()
         human_rates: Dict of human rates {(question_type, match_type): rate}
-        beta: Mixture weight β ∈ [0,1]. 0 = Bayesian, 1 = similarity projection.
+        lambda_mix: Mixture weight λ ∈ [0,1]. 0 = Bayesian, 1 = similarity projection.
         param_grid: Override default parameter grid
 
     Returns:
@@ -512,7 +512,7 @@ def fit_parameters(
         param_grid['match_threshold'], param_grid['epsilon']
     ):
         model = CommonalityModel(
-            k=k, beta=beta,
+            k=k, lambda_mix=lambda_mix,
             sigma_obs=so, sigma_prior=sp, match_threshold=mt, epsilon=eps
         )
         pred_df = fast_evaluate(model, eval_data)

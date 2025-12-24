@@ -35,9 +35,9 @@ class TestModelSetup:
     def test_repr(self):
         """Repr should show key parameters."""
         assert 'k=4' in repr(CommonalityModel(k=4))
-        assert 'Bayesian' in repr(CommonalityModel(k=4, beta=0.0))
-        assert 'SimilarityProjection' in repr(CommonalityModel(beta=1.0))
-        assert 'β=0.50' in repr(CommonalityModel(k=4, beta=0.5))
+        assert 'Bayesian' in repr(CommonalityModel(k=4, lambda_mix=0.0))
+        assert 'SimilarityProjection' in repr(CommonalityModel(lambda_mix=1.0))
+        assert 'λ=0.50' in repr(CommonalityModel(k=4, lambda_mix=0.5))
 
 
 class TestPredictions:
@@ -77,33 +77,33 @@ class TestPredictions:
 class TestModelBehavior:
     """Test that different configurations behave differently."""
 
-    def test_beta_affects_predictions(self):
-        """β=0 (Bayesian) vs β=1 (SimilarityProjection) should give different predictions."""
+    def test_lambda_affects_predictions(self):
+        """λ=0 (Bayesian) vs λ=1 (SimilarityProjection) should give different predictions."""
         r_self = np.array([1.0] * 17 + [5.0] * 18)  # Polarized responses
-        preds_bayes = CommonalityModel(k=5, beta=0.0).predict(0, 3.0, r_self)
-        preds_proj = CommonalityModel(k=5, beta=1.0).predict(0, 3.0, r_self)
+        preds_bayes = CommonalityModel(k=5, lambda_mix=0.0).predict(0, 3.0, r_self)
+        preds_proj = CommonalityModel(k=5, lambda_mix=1.0).predict(0, 3.0, r_self)
         assert not np.allclose(preds_bayes, preds_proj)
 
-    def test_beta_clipped(self):
-        """β should be clipped to [0, 1]."""
-        assert CommonalityModel(beta=1.5).beta == 1.0
-        assert CommonalityModel(beta=-0.5).beta == 0.0
+    def test_lambda_clipped(self):
+        """λ should be clipped to [0, 1]."""
+        assert CommonalityModel(lambda_mix=1.5).lambda_mix == 1.0
+        assert CommonalityModel(lambda_mix=-0.5).lambda_mix == 0.0
 
-    def test_beta_mixture_interpolates(self):
-        """β=0.5 should give predictions between β=0 and β=1."""
+    def test_lambda_mixture_interpolates(self):
+        """λ=0.5 should give predictions between λ=0 and λ=1."""
         r_self = np.random.uniform(1, 5, 35)
-        preds_0 = CommonalityModel(k=5, beta=0.0, epsilon=0.0).predict(0, 3.0, r_self)
-        preds_1 = CommonalityModel(k=5, beta=1.0, epsilon=0.0).predict(0, 3.0, r_self)
-        preds_half = CommonalityModel(k=5, beta=0.5, epsilon=0.0).predict(0, 3.0, r_self)
+        preds_0 = CommonalityModel(k=5, lambda_mix=0.0, epsilon=0.0).predict(0, 3.0, r_self)
+        preds_1 = CommonalityModel(k=5, lambda_mix=1.0, epsilon=0.0).predict(0, 3.0, r_self)
+        preds_half = CommonalityModel(k=5, lambda_mix=0.5, epsilon=0.0).predict(0, 3.0, r_self)
         # Mixture should be close to average
         expected = 0.5 * preds_0 + 0.5 * preds_1
         assert np.allclose(preds_half, expected, atol=0.01)
 
     def test_similarity_projection_uses_self_structure(self):
-        """Similarity projection (β=1) should produce gradients based on self-response similarity."""
+        """Similarity projection (λ=1) should produce gradients based on self-response similarity."""
         # Self responds identically on q0 and q1, differently on q2
         r_self = np.array([3.0, 3.0, 1.0] + [3.0] * 32)
-        model = CommonalityModel(beta=1.0, epsilon=0.0)  # Pure similarity projection
+        model = CommonalityModel(lambda_mix=1.0, epsilon=0.0)  # Pure similarity projection
         preds = model.predict(0, 3.0, r_self)  # Observe match on q0
         # q1 (same self-response as q0) should have higher prediction than q2 (different)
         assert preds[1] > preds[2], "Self-similar questions should have higher predictions"
@@ -111,8 +111,8 @@ class TestModelBehavior:
         assert preds.std() > 0.01, "Predictions should vary based on self-similarity"
 
     def test_k5_creates_gradient(self):
-        """With k>0 and β=0, predictions should vary across questions."""
-        model = CommonalityModel(k=5, beta=0.0, epsilon=0.0)
+        """With k>0 and λ=0, predictions should vary across questions."""
+        model = CommonalityModel(k=5, lambda_mix=0.0, epsilon=0.0)
         r_self = np.random.uniform(1, 5, 35)
         preds = model.predict(0, r_self[0], r_self)
         assert preds.std() > 0.01  # Non-trivial variation

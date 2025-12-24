@@ -254,9 +254,9 @@ from models.model import prepare_evaluation_data, fast_evaluate
 nochat_data = data[data['experiment'] == 'no-chat'].copy()
 nochat_eval = prepare_evaluation_data(nochat_data)
 
-# Run k=5 model (Bayesian, β=0) with paper's parameters
+# Run k=5 model (Bayesian, λ=0) with paper's parameters
 model_k5 = CommonalityModel(
-    k=5, beta=0.0,
+    k=5, lambda_mix=0.0,
     sigma_obs=0.3, sigma_prior=2.0, match_threshold=1.5, epsilon=0.2
 )
 nochat_preds = fast_evaluate(model_k5, nochat_eval)
@@ -383,7 +383,7 @@ human_ci = bootstrap_gradient(human_preds)
 
 # Bayesian (k=5) with CI
 real_loadings = load_factor_loadings(k=5)
-m_bayes = CommonalityModel(k=5, beta=0.0, loadings=real_loadings,
+m_bayes = CommonalityModel(k=5, lambda_mix=0.0, loadings=real_loadings,
     sigma_obs=0.3, sigma_prior=2.0, match_threshold=1.5, epsilon=0.2)
 bayes_preds = fast_evaluate(m_bayes, nochat_eval)
 bayes_gradient = compute_gradient_from_preds(bayes_preds)
@@ -391,7 +391,7 @@ bayes_ci = bootstrap_gradient(bayes_preds)
 
 # Similarity Projection (Ames 2004; Tamir & Mitchell 2013) with CI
 # Uses self-response similarity for question-specific transfer
-m_proj = CommonalityModel(k=0, beta=1.0,
+m_proj = CommonalityModel(k=0, lambda_mix=1.0,
     sigma_obs=0.3, sigma_prior=2.0, match_threshold=1.5, epsilon=0.1,
     base_rate=0.2, projection_weight=0.8)  # Fitted to maximize gradient
 proj_preds = fast_evaluate(m_proj, nochat_eval)
@@ -403,7 +403,7 @@ shuffled_grads = []
 for seed in range(100):
     np.random.seed(seed)
     perm = np.random.permutation(35)
-    m = CommonalityModel(k=5, beta=0.0, loadings=real_loadings[perm, :],
+    m = CommonalityModel(k=5, lambda_mix=0.0, loadings=real_loadings[perm, :],
         sigma_obs=0.3, sigma_prior=2.0, match_threshold=1.5, epsilon=0.2)
     preds = fast_evaluate(m, nochat_eval)
     shuffled_grads.append(compute_gradient_from_preds(preds))
