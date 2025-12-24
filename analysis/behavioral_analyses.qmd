@@ -81,7 +81,7 @@ print(f'Data directory: {data_dir}')
 
 ```{python}
 # Load pre-merged behavioral data
-df = pl.read_csv(data_dir / 'behavioral_data.csv')
+df = pl.read_csv(data_dir / 'experiment_data.csv')
 df = df.filter(~col('matchedTolerance').is_null())
 
 # Derived variables
@@ -352,7 +352,7 @@ Paper reports: β = 0.15, CI [0.09, 0.21] for population rate predicting commona
 
 ```{python}
 # Use main behavioral data for prior calibration
-emp = pd.read_csv(data_dir / 'behavioral_data.csv')
+emp = pd.read_csv(data_dir / 'experiment_data.csv')
 n_participants = emp['pid'].nunique()
 
 props = emp.groupby(['question', 'preChatResponse']).size().reset_index(name='count')

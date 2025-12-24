@@ -240,7 +240,12 @@ def load_question_means() -> np.ndarray:
 
 def load_unified_data() -> pd.DataFrame:
     """Load unified evaluation dataset."""
-    return pd.read_csv(DATA_DIR / "unified_input.csv")
+    df = pd.read_csv(DATA_DIR / "experiment_data.csv", low_memory=False)
+    # Add column aliases for backward compatibility
+    df['own_response'] = df['preChatResponse']
+    df['question_domain'] = df['preChatDomain']
+    df['matched_question'] = df['matchedIdx']
+    return df
 
 
 # ============================================================================

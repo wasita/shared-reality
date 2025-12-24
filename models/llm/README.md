@@ -132,7 +132,7 @@ Question indices correspond to the shuffled order in the prompt (seeded for repr
 All data is loaded from `/paper/data/`:
 
 - `questions.csv` - 35 survey questions with domains
-- `unified_input.csv` - All participant data (chat + no-chat conditions)
+- `experiment_data.csv` - All participant data (chat + no-chat conditions)
 
 ## File Structure
 
