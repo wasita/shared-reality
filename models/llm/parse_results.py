@@ -182,7 +182,7 @@ def compute_chat_timecourse_accuracy(results: list) -> pd.DataFrame:
         DataFrame with accuracy by time_bin, match_type, question_category
     """
     # Load raw chat messages and derive group metadata
-    messages = pd.read_csv(DATA_DIR / "all-match-chat-messages.csv")
+    messages = pd.read_csv(DATA_DIR / "chat_messages.csv")
     questions = load_questions()
 
     # Build group_id -> metadata map from chat messages
