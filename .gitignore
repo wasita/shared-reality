@@ -29,3 +29,7 @@ models/llm/batch_requests/
 *.out
 *.bbl
 *.blg
+
+# Generated outputs
+latex/
+outputs/

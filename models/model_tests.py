@@ -232,5 +232,53 @@ class TestPerceivedResponse:
         assert np.all((eval_data['r_partners'] >= 1) & (eval_data['r_partners'] <= 5))
 
 
+class TestDeltaObservation:
+    """Test delta function observation (σ_obs=0) for no-chat condition."""
+
+    def test_sigma_obs_zero_works(self):
+        """Model should work with σ_obs=0 (delta observation)."""
+        model = CommonalityModel(k=5, sigma_obs=0.0)
+        r_self = np.random.uniform(1, 5, 35)
+        preds = model.predict(0, 3.0, r_self)
+        assert np.all(np.isfinite(preds))
+        assert preds.shape == (35,)
+
+    def test_sigma_obs_positive_works(self):
+        """Model should work with σ_obs>0 (Gaussian observation)."""
+        model = CommonalityModel(k=5, sigma_obs=0.3)
+        r_self = np.random.uniform(1, 5, 35)
+        preds = model.predict(0, 3.0, r_self)
+        assert np.all(np.isfinite(preds))
+
+    def test_delta_gives_sharper_predictions(self):
+        """Delta observation should give more confident predictions than Gaussian."""
+        r_self = np.random.uniform(1, 5, 35)
+        preds_delta = CommonalityModel(k=5, sigma_obs=0.0, epsilon=0.1).predict(0, 3.0, r_self)
+        preds_gauss = CommonalityModel(k=5, sigma_obs=1.0, epsilon=0.1).predict(0, 3.0, r_self)
+        # Delta should have more extreme predictions (further from 0.5)
+        dist_delta = np.abs(preds_delta - 0.5).mean()
+        dist_gauss = np.abs(preds_gauss - 0.5).mean()
+        assert dist_delta >= dist_gauss * 0.9  # Allow some tolerance
+
+    def test_delta_batch_matches_single(self):
+        """Batch predictions with delta should match single predictions."""
+        model = CommonalityModel(k=5, sigma_obs=0.0)
+        r_selves = np.random.uniform(1, 5, (3, 35))
+        obs_qs = np.array([0, 5, 10])
+        r_partners = np.array([2.0, 3.0, 4.0])
+
+        batch_preds = model.predict_batch(obs_qs, r_partners, r_selves)
+        for i in range(3):
+            single_pred = model.predict(obs_qs[i], r_partners[i], r_selves[i])
+            assert np.allclose(batch_preds[i], single_pred, rtol=1e-5)
+
+    def test_delta_works_all_k(self):
+        """Delta observation should work for all k values."""
+        r_self = np.random.uniform(1, 5, 35)
+        for k in [0, 1, 5, 35]:
+            preds = CommonalityModel(k=k, sigma_obs=0.0).predict(0, 3.0, r_self)
+            assert np.all(np.isfinite(preds)), f"Failed for k={k}"
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

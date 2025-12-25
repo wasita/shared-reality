@@ -167,40 +167,101 @@ print(f'\nFactor loadings shape: {loadings.shape}')
 
 ## 2. Parameter Fitting
 
-We fit model parameters (σ_obs, σ_prior, τ, ε) by grid search, minimizing deviation from human transfer effects. This is done separately for each k to ensure fair model comparison.
+We fit parameters on the no-chat condition. Note: σ_obs is fixed at 0 because
+observations are exact in this condition (participants see explicit binary responses).
 
-Parameters are pre-computed and cached in `data/fitted_params.json`.
+1. **k=5 optimal**: Best params for the main model (k=5), used in Figure 4 and model comparison
+2. **Unified**: Best params across ALL k values, used in k-sweep to ensure fair comparison
 
 ```{python}
 import json
+from models.model import fit_parameters, prepare_evaluation_data
 
-# Load pre-computed fitted parameters
-with open(base_dir / 'data' / 'fitted_params.json') as f:
-    fitted_cache = json.load(f)
+# Fit on no-chat data (information-matched to Bayesian model)
+nochat_data = data[data['experiment'] == 'no-chat'].copy()
+nochat_eval = prepare_evaluation_data(nochat_data)
 
-# Extract params for main comparison models
-fitted_params = {
-    int(k): fitted_cache['bayesian'][k]['params']
-    for k in ['1', '4', '35']
-}
+# Compute human rates for no-chat condition
+NOCHAT_HUMAN = {}
+for qt in ['observed', 'same_domain', 'different_domain']:
+    for mt in ['high', 'low']:
+        cell = nochat_data[(nochat_data['question_type'] == qt) & (nochat_data['match_type'] == mt)]
+        NOCHAT_HUMAN[(qt, mt)] = cell['participant_binary_prediction'].mean()
 
-# Display fitted parameters
-print("=== Fitted Parameters (from cache) ===\n")
-for k, params in sorted(fitted_params.items()):
-    print(f"k={k}: σ_obs={params['sigma_obs']}, σ_prior={params['sigma_prior']}, "
-          f"τ={params['match_threshold']}, ε={params['epsilon']}")
+# K values used in the k-sweep
+K_VALUES = [1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 35]
+
+# Check if cached params exist and are valid
+params_path = base_dir / 'data' / 'fitted_params.json'
+refit = False
+
+if params_path.exists():
+    with open(params_path) as f:
+        fitted_cache = json.load(f)
+    if 'k5_params' in fitted_cache and 'unified_params' in fitted_cache:
+        K5_PARAMS = fitted_cache['k5_params']
+        UNIFIED_PARAMS = fitted_cache['unified_params']
+        print("=== Loaded Fitted Parameters (σ_obs=0 fixed) ===\n")
+        print(f"k=5 optimal: σ_prior={K5_PARAMS['sigma_prior']:.4f}, "
+              f"τ={K5_PARAMS['match_threshold']:.4f}, ε={K5_PARAMS['epsilon']:.4f}")
+        print(f"Unified:     σ_prior={UNIFIED_PARAMS['sigma_prior']:.4f}, "
+              f"τ={UNIFIED_PARAMS['match_threshold']:.4f}, ε={UNIFIED_PARAMS['epsilon']:.4f}")
+    else:
+        print("Cache in old format. Refitting...")
+        refit = True
+else:
+    print("No cache found. Fitting parameters...")
+    refit = True
+
+if refit:
+    # Fit k=5 optimal params (for Figure 4 and model comparison)
+    print("Fitting k=5 optimal parameters...")
+    K5_PARAMS, k5_metrics = fit_parameters(
+        k_values=[5],  # Single k = k-specific optimal
+        eval_data=nochat_eval,
+        human_rates=NOCHAT_HUMAN,
+        verbose=True,
+    )
+
+    # Fit unified params across all k (for k-sweep, ensures fair comparison)
+    print(f"\nFitting unified parameters across k={K_VALUES}...")
+    UNIFIED_PARAMS, unified_metrics = fit_parameters(
+        k_values=K_VALUES,  # Multiple k = unified (no k favored)
+        eval_data=nochat_eval,
+        human_rates=NOCHAT_HUMAN,
+        verbose=True,
+    )
+
+    # Save to JSON
+    fitted_cache = {
+        'k5_params': K5_PARAMS,
+        'k5_metrics': k5_metrics,
+        'unified_params': UNIFIED_PARAMS,
+        'unified_metrics': unified_metrics,
+        'k_values': K_VALUES,
+        'human_rates': {f"{qt}_{mt}": rate for (qt, mt), rate in NOCHAT_HUMAN.items()},
+        'data_subset': 'no-chat',
+    }
+    with open(params_path, 'w') as f:
+        json.dump(fitted_cache, f, indent=2)
+    print(f"\nSaved to {params_path}")
+
+# FITTED_PARAMS = k=5 optimal (for Figure 4, model comparison)
+# UNIFIED_PARAMS = fair across all k (for k-sweep)
+FITTED_PARAMS = K5_PARAMS
 ```
 
 ## 3. Model Comparison
 
-Using fitted parameters for fair comparison.
+Using the same fitted parameters across all models for fair comparison.
 
 ```{python}
-# Define nested models with fitted parameters
+# Define nested models with the SAME fitted parameters
+# This isolates the effect of k without confounding from parameter differences
 model_specs = {
-    'k=1 (baseline)': {'k': 1, **fitted_params[1]},
-    'k=4 (factor)': {'k': 4, **fitted_params[4]},
-    'k=35 (full cov)': {'k': 35, **fitted_params[35]},
+    'k=1 (baseline)': {'k': 1, **FITTED_PARAMS},
+    'k=4 (factor)': {'k': 4, **FITTED_PARAMS},
+    'k=35 (full cov)': {'k': 35, **FITTED_PARAMS},
 }
 ```
 
@@ -241,7 +302,7 @@ for name, r in results.items():
 
 ## 4. Figure 4
 
-The Bayesian model receives only a single Likert response, so we evaluate on the **no-chat** condition where human participants also receive only this information.
+The Bayesian model receives only a single Likert response, so we evaluate on the **no-chat** condition where human participants also receive only this information. Panel A mirrors Figure 2 format, showing model predictions.
 
 ```{python}
 #| fig-cap: "Figure 4: Factor structure captures systematic generalization"
@@ -250,60 +311,92 @@ The Bayesian model receives only a single Likert response, so we evaluate on the
 
 from models.model import prepare_evaluation_data, fast_evaluate
 
+# Style settings to match Figure 3
+plt.rcParams['font.family'] = 'Helvetica Neue'
+plt.rcParams['axes.spines.top'] = False
+plt.rcParams['axes.spines.right'] = False
+
+# Color palette (consistent with paper)
+COLOR_LOW = '#648FFF'        # Blue (opposing/low-match)
+COLOR_HIGH = '#DC267F'       # Pink (shared/high-match)
+COLOR_HUMAN = '#2c3e50'      # Dark gray
+COLOR_BAYESIAN = '#648FFF'   # Blue
+COLOR_EGOCENTRIC = '#e07a5f' # Muted coral
+COLOR_SCRAMBLED = '#95a5a6'  # Light gray
+
 # Evaluate model on NO-CHAT condition only (information-matched)
 nochat_data = data[data['experiment'] == 'no-chat'].copy()
 nochat_eval = prepare_evaluation_data(nochat_data)
 
-# Run k=5 model (Bayesian, λ=0) with paper's parameters
-model_k5 = CommonalityModel(
-    k=5, lambda_mix=0.0,
-    sigma_obs=0.3, sigma_prior=2.0, match_threshold=1.5, epsilon=0.2
-)
+# Run k=5 model with UNIFIED parameters (σ_obs=0 for no-chat)
+PARAMS = {'sigma_obs': 0.0, 'sigma_prior': 1.5, 'match_threshold': 2.0, 'epsilon': 0.1}
+model_k5 = CommonalityModel(k=5, lambda_mix=0.0, **PARAMS)
 nochat_preds = fast_evaluate(model_k5, nochat_eval)
 nochat_preds['domain'] = nochat_preds['question_domain'].str.lower()
 
-# Compute human rates for no-chat condition
-NOCHAT_HUMAN = {}
-for qt in ['observed', 'same_domain', 'different_domain']:
-    for mt in ['high', 'low']:
-        cell = nochat_data[(nochat_data['question_type'] == qt) & (nochat_data['match_type'] == mt)]
-        NOCHAT_HUMAN[(qt, mt)] = cell['participant_binary_prediction'].mean()
+# Compute model rates
+def get_rates(preds_df, col):
+    rates = {}
+    for qt in ['observed', 'same_domain', 'different_domain']:
+        for mt in ['high', 'low']:
+            cell = preds_df[(preds_df['question_type'] == qt) & (preds_df['match_type'] == mt)]
+            rates[(qt, mt)] = cell[col].mean()
+    return rates
+
+model_rates = get_rates(nochat_preds, 'pred_prob')
 
 fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
-# --- Panel A: Generalization Gradient (effects) ---
+# --- Panel A: Model predictions (mirrors Figure 2 no-chat format) ---
 ax = axes[0]
 
-qt_labels = ['Observed', 'Same\nDomain', 'Different\nDomain']
+# Bootstrap function for rates
+def bootstrap_rates(preds_df, col, n_boot=1000, seed=42):
+    """Bootstrap confidence intervals for cell rates."""
+    np.random.seed(seed)
+    pids = preds_df['pid'].unique()
+    boot_rates = {(qt, mt): [] for qt in ['observed', 'same_domain', 'different_domain']
+                                for mt in ['high', 'low']}
+    for _ in range(n_boot):
+        boot_pids = np.random.choice(pids, size=len(pids), replace=True)
+        boot_df = preds_df[preds_df['pid'].isin(boot_pids)]
+        for qt in ['observed', 'same_domain', 'different_domain']:
+            for mt in ['high', 'low']:
+                cell = boot_df[(boot_df['question_type'] == qt) & (boot_df['match_type'] == mt)]
+                boot_rates[(qt, mt)].append(cell[col].mean() if len(cell) else np.nan)
+    return {k: np.percentile(v, [2.5, 97.5]) for k, v in boot_rates.items()}
+
+rate_cis = bootstrap_rates(nochat_preds, 'pred_prob')
+
 qt_keys = ['observed', 'same_domain', 'different_domain']
+qt_labels = ['Observed', 'Same\nDomain', 'Different\nDomain']
 x = np.arange(len(qt_keys))
 width = 0.35
 
-# Compute effects (high - low) for human and model
-human_effects = [NOCHAT_HUMAN[(qt, 'high')] - NOCHAT_HUMAN[(qt, 'low')] for qt in qt_keys]
+low_rates = [model_rates[(qt, 'low')] for qt in qt_keys]
+high_rates = [model_rates[(qt, 'high')] for qt in qt_keys]
 
-model_low, model_high = [], []
-for qt in qt_keys:
-    qt_preds = nochat_preds[nochat_preds['question_type'] == qt]
-    model_high.append(qt_preds[qt_preds['match_type'] == 'high']['pred_prob'].mean())
-    model_low.append(qt_preds[qt_preds['match_type'] == 'low']['pred_prob'].mean())
-model_effects = [h - l for h, l in zip(model_high, model_low)]
+# Compute error bars for each bar
+low_yerr = [[model_rates[(qt, 'low')] - rate_cis[(qt, 'low')][0] for qt in qt_keys],
+            [rate_cis[(qt, 'low')][1] - model_rates[(qt, 'low')] for qt in qt_keys]]
+high_yerr = [[model_rates[(qt, 'high')] - rate_cis[(qt, 'high')][0] for qt in qt_keys],
+             [rate_cis[(qt, 'high')][1] - model_rates[(qt, 'high')] for qt in qt_keys]]
 
-# Plot effects as grouped bars
-ax.bar(x - width/2, human_effects, width, color='#2c3e50', alpha=0.8, label='Human')
-ax.bar(x + width/2, model_effects, width, color='#27ae60', alpha=0.8, label='Bayesian (k=5)')
+ax.bar(x - width/2, low_rates, width, color=COLOR_LOW, label='Low match',
+       yerr=low_yerr, capsize=3, error_kw={'linewidth': 1.2, 'capthick': 1.2})
+ax.bar(x + width/2, high_rates, width, color=COLOR_HIGH, label='High match',
+       yerr=high_yerr, capsize=3, error_kw={'linewidth': 1.2, 'capthick': 1.2})
 
 ax.set_xticks(x)
 ax.set_xticklabels(qt_labels)
-ax.set_ylabel('Effect (high − low match)')
-ax.set_title('A. Generalization Gradient', fontweight='bold')
+ax.set_ylabel('Model P(shared)', fontweight='bold')
+ax.set_ylim(0, 1.0)
 ax.legend(frameon=False, loc='upper right')
-ax.axhline(0, color='gray', linewidth=0.5)
+ax.text(-0.15, 1.05, 'A', transform=ax.transAxes, fontsize=16, fontweight='bold')
 
-# --- Panel B: Domain-level predictions ---
+# --- Panel B: Domain-level fit ---
 ax = axes[1]
 
-# Compute domain effects (no-chat)
 domain_data = []
 for domain in DOMAIN_RANGES.keys():
     for qt in ['same_domain', 'different_domain']:
@@ -315,138 +408,124 @@ for domain in DOMAIN_RANGES.keys():
         low = domain_preds[domain_preds['match_type'] == 'low']
         if len(high) == 0 or len(low) == 0:
             continue
-        model_effect = high['pred_prob'].mean() - low['pred_prob'].mean()
-        human_effect = high['actual'].mean() - low['actual'].mean()
-
         domain_data.append({
             'domain': domain,
             'question_type': qt,
-            'model_effect': model_effect,
-            'human_effect': human_effect
+            'model_effect': high['pred_prob'].mean() - low['pred_prob'].mean(),
+            'human_effect': high['actual'].mean() - low['actual'].mean()
         })
 
 domain_df = pd.DataFrame(domain_data)
 
-# Scatter plot
-colors = {'same_domain': '#3498db', 'different_domain': '#95a5a6'}
-markers = {'same_domain': 'o', 'different_domain': 's'}
 for qt in ['same_domain', 'different_domain']:
     qt_df = domain_df[domain_df['question_type'] == qt]
+    color = COLOR_BAYESIAN if qt == 'same_domain' else COLOR_SCRAMBLED
+    marker = 'o' if qt == 'same_domain' else 's'
     ax.scatter(qt_df['model_effect'], qt_df['human_effect'],
-               c=colors[qt], marker=markers[qt], s=80, alpha=0.8,
+               c=color, marker=marker, s=80, edgecolors='white', linewidth=0.5,
                label='Same domain' if qt == 'same_domain' else 'Different domain')
 
-# Correlation
 r = np.corrcoef(domain_df['model_effect'], domain_df['human_effect'])[0, 1]
-ax.text(0.05, 0.95, f'r = {r:.2f}', transform=ax.transAxes, fontsize=11)
+ax.text(0.05, 0.95, f'r = {r:.2f}', transform=ax.transAxes, fontsize=12, fontweight='bold')
 
-# Diagonal line
-lims = [min(ax.get_xlim()[0], ax.get_ylim()[0]),
-        max(ax.get_xlim()[1], ax.get_ylim()[1])]
-ax.plot(lims, lims, 'k--', alpha=0.3, linewidth=1)
+lims = [-0.02, max(ax.get_xlim()[1], ax.get_ylim()[1]) + 0.02]
+ax.plot(lims, lims, '--', color='gray', alpha=0.3, linewidth=1, zorder=0)
 ax.set_xlim(lims)
 ax.set_ylim(lims)
 
-ax.set_xlabel('Model Effect')
-ax.set_ylabel('Human Effect')
-ax.set_title('B. Domain-level Fit', fontweight='bold')
+ax.set_xlabel('Model effect', fontweight='bold')
+ax.set_ylabel('Human effect', fontweight='bold')
 ax.legend(frameon=False, loc='lower right')
+ax.text(-0.15, 1.05, 'B', transform=ax.transAxes, fontsize=16, fontweight='bold')
 
-# --- Panel C: Model comparison with bootstrap CIs ---
+# --- Panel C: Model comparison ---
 ax = axes[2]
 
-def compute_gradient_from_preds(preds_df):
+def compute_gradient(preds_df, col='pred_prob'):
     """Compute gradient from predictions DataFrame."""
     rates = {}
     for qt in ['same_domain', 'different_domain']:
         for mt in ['high', 'low']:
             cell = preds_df[(preds_df['question_type'] == qt) & (preds_df['match_type'] == mt)]
-            rates[(qt, mt)] = cell['pred_prob'].mean() if 'pred_prob' in cell.columns else cell['actual'].mean()
+            rates[(qt, mt)] = cell[col].mean()
     return (rates[('same_domain', 'high')] - rates[('same_domain', 'low')]) - \
            (rates[('different_domain', 'high')] - rates[('different_domain', 'low')])
 
-def bootstrap_gradient(preds_df, n_boot=500):
-    """Bootstrap CIs for gradient."""
-    unique_pids = preds_df['pid'].unique()
+def bootstrap_gradient(preds_df, col, n_boot=1000, seed=42):
+    """Bootstrap confidence interval for gradient."""
+    np.random.seed(seed)
+    pids = preds_df['pid'].unique()
     boot_grads = []
     for _ in range(n_boot):
-        boot_pids = np.random.choice(unique_pids, size=len(unique_pids), replace=True)
-        boot_df = pd.concat([preds_df[preds_df['pid'] == p] for p in boot_pids], ignore_index=True)
-        boot_grads.append(compute_gradient_from_preds(boot_df))
-    return np.percentile(boot_grads, 2.5), np.percentile(boot_grads, 97.5)
+        boot_pids = np.random.choice(pids, size=len(pids), replace=True)
+        boot_df = preds_df[preds_df['pid'].isin(boot_pids)]
+        boot_grads.append(compute_gradient(boot_df, col))
+    return np.percentile(boot_grads, [2.5, 97.5])
 
-# Human gradient with CI
-human_preds = nochat_preds.copy()
-human_preds['pred_prob'] = human_preds['actual']
-human_gradient = compute_gradient_from_preds(human_preds)
-human_ci = bootstrap_gradient(human_preds)
+human_gradient = compute_gradient(nochat_preds, 'actual')
+bayes_gradient = compute_gradient(nochat_preds, 'pred_prob')
 
-# Bayesian (k=5) with CI
-real_loadings = load_factor_loadings(k=5)
-m_bayes = CommonalityModel(k=5, lambda_mix=0.0, loadings=real_loadings,
-    sigma_obs=0.3, sigma_prior=2.0, match_threshold=1.5, epsilon=0.2)
-bayes_preds = fast_evaluate(m_bayes, nochat_eval)
-bayes_gradient = compute_gradient_from_preds(bayes_preds)
-bayes_ci = bootstrap_gradient(bayes_preds)
+# Bootstrap CIs for human and Bayesian
+human_ci = bootstrap_gradient(nochat_preds, 'actual')
+bayes_ci = bootstrap_gradient(nochat_preds, 'pred_prob')
 
-# Similarity Projection (Ames 2004; Tamir & Mitchell 2013) with CI
-# Uses self-response similarity for question-specific transfer
-m_proj = CommonalityModel(k=0, lambda_mix=1.0,
-    sigma_obs=0.3, sigma_prior=2.0, match_threshold=1.5, epsilon=0.1,
-    base_rate=0.2, projection_weight=0.8)  # Fitted to maximize gradient
+# Similarity Projection model
+m_proj = CommonalityModel(k=0, lambda_mix=1.0, **PARAMS,
+    base_rate=0.2, projection_weight=0.8)
 proj_preds = fast_evaluate(m_proj, nochat_eval)
-proj_gradient = compute_gradient_from_preds(proj_preds)
-proj_ci = bootstrap_gradient(proj_preds)
+proj_preds['pid'] = nochat_preds['pid'].values  # Copy pids for bootstrapping
+proj_gradient = compute_gradient(proj_preds, 'pred_prob')
+proj_ci = bootstrap_gradient(proj_preds, 'pred_prob')
 
-# Scrambled loadings (mean ± SE over permutations)
+# Scrambled loadings control (with bootstrap CI)
+real_loadings = load_factor_loadings(k=5)
+np.random.seed(42)
 shuffled_grads = []
 for seed in range(100):
     np.random.seed(seed)
     perm = np.random.permutation(35)
-    m = CommonalityModel(k=5, lambda_mix=0.0, loadings=real_loadings[perm, :],
-        sigma_obs=0.3, sigma_prior=2.0, match_threshold=1.5, epsilon=0.2)
+    m = CommonalityModel(k=5, lambda_mix=0.0, loadings=real_loadings[perm, :], **PARAMS)
     preds = fast_evaluate(m, nochat_eval)
-    shuffled_grads.append(compute_gradient_from_preds(preds))
+    shuffled_grads.append(compute_gradient(preds, 'pred_prob'))
 scrambled_gradient = np.mean(shuffled_grads)
-scrambled_ci = (scrambled_gradient - 1.96*np.std(shuffled_grads),
-                scrambled_gradient + 1.96*np.std(shuffled_grads))
+scrambled_ci = [np.percentile(shuffled_grads, 2.5), np.percentile(shuffled_grads, 97.5)]
 
 # Plot bars with error bars
 model_labels = ['Human', 'Bayesian\n(k=5)', 'Similarity\nProjection', 'Scrambled']
 gradients = [human_gradient, bayes_gradient, proj_gradient, scrambled_gradient]
+colors_c = [COLOR_HUMAN, COLOR_BAYESIAN, COLOR_EGOCENTRIC, COLOR_SCRAMBLED]
+
+# Compute error bar lengths (distance from point to CI bounds)
 cis = [human_ci, bayes_ci, proj_ci, scrambled_ci]
-errors = [[g - ci[0] for g, ci in zip(gradients, cis)],
-          [ci[1] - g for g, ci in zip(gradients, cis)]]
+yerr_lower = [g - ci[0] for g, ci in zip(gradients, cis)]
+yerr_upper = [ci[1] - g for g, ci in zip(gradients, cis)]
 
-colors = ['#2c3e50', '#27ae60', '#e74c3c', '#95a5a6']
-x_pos = np.arange(len(model_labels))
+ax.bar(range(len(gradients)), gradients, color=colors_c, yerr=[yerr_lower, yerr_upper],
+       capsize=4, error_kw={'linewidth': 1.5, 'capthick': 1.5})
+ax.set_xticks(range(len(model_labels)))
+ax.set_xticklabels(model_labels, fontsize=10)
+ax.set_ylabel('Gradient (same − diff)', fontweight='bold')
+ax.set_ylim(0, max([g + e for g, e in zip(gradients, yerr_upper)]) * 1.2)
 
-ax.bar(x_pos, gradients, color=colors, alpha=0.8, yerr=errors, capsize=4, error_kw={'linewidth': 1.5})
-ax.set_xticks(x_pos)
-ax.set_xticklabels(model_labels, fontsize=9)
-ax.set_ylabel('Gradient (same − diff)')
-ax.set_title('C. Model Comparison', fontweight='bold')
-ax.set_ylim(0, max([ci[1] for ci in cis]) * 1.15)
-
-# Significance bracket between Bayesian and Similarity Projection
-bracket_y = max(bayes_ci[1], proj_ci[1]) + 0.01
-ax.plot([1, 1, 2, 2], [bayes_ci[1]+0.005, bracket_y, bracket_y, proj_ci[1]+0.005], 'k-', lw=1)
-ax.text(1.5, bracket_y + 0.003, '***', ha='center', fontsize=10)
+# Significance bracket (positioned above error bars)
+bracket_y = max(bayes_gradient + yerr_upper[1], proj_gradient + yerr_upper[2]) + 0.012
+ax.plot([1, 1, 2, 2], [bayes_gradient + yerr_upper[1] + 0.003, bracket_y,
+        bracket_y, proj_gradient + yerr_upper[2] + 0.003],
+        'k-', lw=1, solid_capstyle='butt')
+ax.text(1.5, bracket_y + 0.003, '***', ha='center', fontsize=11, fontweight='bold')
+ax.text(-0.15, 1.05, 'C', transform=ax.transAxes, fontsize=16, fontweight='bold')
 
 plt.tight_layout()
 plt.savefig(base_dir / 'outputs' / 'figures' / 'figure4.pdf', dpi=300, bbox_inches='tight')
 plt.show()
 
 # Print key statistics
-print(f'\n=== Model Comparison (no-chat) ===')
-print(f'Human:               {human_gradient:+.3f} [{human_ci[0]:.3f}, {human_ci[1]:.3f}]')
-print(f'Bayesian:            {bayes_gradient:+.3f} [{bayes_ci[0]:.3f}, {bayes_ci[1]:.3f}]')
-print(f'Similarity Proj:     {proj_gradient:+.3f} [{proj_ci[0]:.3f}, {proj_ci[1]:.3f}]')
-print(f'Scrambled:           {scrambled_gradient:+.3f} [{scrambled_ci[0]:.3f}, {scrambled_ci[1]:.3f}]')
+print(f'\n=== Model Comparison (no-chat, unified params) ===')
+print(f'Human gradient:      {human_gradient:+.3f}')
+print(f'Bayesian:            {bayes_gradient:+.3f} ({bayes_gradient/human_gradient*100:.0f}%)')
+print(f'Similarity Proj:     {proj_gradient:+.3f} ({proj_gradient/human_gradient*100:.0f}%)')
+print(f'Scrambled:           {scrambled_gradient:+.3f}')
 print(f'\nDomain-level correlation: r = {r:.2f}')
-print(f'\n→ Bayesian captures {bayes_gradient/human_gradient*100:.0f}% of human gradient')
-print(f'→ Similarity Projection captures {proj_gradient/human_gradient*100:.0f}% (predicts ~0 gradient)')
-print(f'→ Bayesian vs Similarity Projection: p < .001 (bootstrap)')
 ```
 
 ## 5. LLM Analysis
@@ -540,106 +619,240 @@ for _, row in final_bin.iterrows():
 
 ## 6. K-Sweep Analysis (Supplementary)
 
-Model performance as a function of factor dimensionality k. Parameters are fitted separately for each k to ensure fair comparison.
+Model performance as a function of factor dimensionality k. To isolate the effect of
+dimensionality, we use **fixed parameters** across all k values (from the main k=5 model)
+and evaluate on the **no-chat condition** (information-matched to the Bayesian model).
+
+Note: We start from k=1 (first principal component) rather than k=0. A k=0 model with
+flat loadings still produces spurious gradients because P(match) depends on self-response
+similarity, and people's responses are more correlated within domains than across. This
+confound makes k=0 unsuitable as a null model for testing factor dimensionality.
 
 ```{python}
 import matplotlib.gridspec as gridspec
 
-# Load k-sweep results from cache
+# Use UNIFIED_PARAMS for k-sweep (fair comparison - no k is favored)
+# nochat_data and nochat_eval already defined in Section 2
+
+# K values to sweep (same as used for unified fitting)
+# Note: We exclude k=0 because it produces spurious gradients from self-response
+# correlations within domains, not from factor structure
+k_values = K_VALUES  # Start from k=1
+
+# Compute metrics for each k with unified parameters
 k_sweep_results = []
-for k_str, result in fitted_cache['bayesian'].items():
+for k in k_values:
+    model = CommonalityModel(k=k, **UNIFIED_PARAMS)
+    preds = fast_evaluate(model, nochat_eval)
+
+    # Filter to inference questions (exclude observed)
+    inf = preds[preds['question_type'] != 'observed']
+
+    # Log-likelihood
+    probs = np.clip(inf['pred_prob'].values, 1e-10, 1-1e-10)
+    actual = inf['actual'].values
+    ll = np.sum(actual * np.log(probs) + (1 - actual) * np.log(1 - probs))
+
+    # Accuracy
+    accuracy = np.mean((probs > 0.5) == actual)
+
+    # Effects by question type and match type
+    same_high = preds[(preds['question_type'] == 'same_domain') & (preds['match_type'] == 'high')]['pred_prob'].mean()
+    same_low = preds[(preds['question_type'] == 'same_domain') & (preds['match_type'] == 'low')]['pred_prob'].mean()
+    diff_high = preds[(preds['question_type'] == 'different_domain') & (preds['match_type'] == 'high')]['pred_prob'].mean()
+    diff_low = preds[(preds['question_type'] == 'different_domain') & (preds['match_type'] == 'low')]['pred_prob'].mean()
+
+    same_effect = same_high - same_low
+    diff_effect = diff_high - diff_low
+    gradient = same_effect - diff_effect
+
     k_sweep_results.append({
-        'k': int(k_str),
-        'same_effect': result['metrics']['same_domain_effect'],
-        'diff_effect': result['metrics']['different_domain_effect'],
-        'gradient': result['metrics']['gradient'],
-        'log_likelihood': result['metrics']['log_likelihood'],
-        'accuracy': result['metrics']['accuracy'],
-        'gradient_error': result['metrics']['gradient_error'],
-        **result['params'],
+        'k': k,
+        'same_effect': same_effect,
+        'diff_effect': diff_effect,
+        'gradient': gradient,
+        'log_likelihood': ll,
+        'accuracy': accuracy,
     })
 
-k_sweep = pd.DataFrame(k_sweep_results).sort_values('k').reset_index(drop=True)
+k_sweep = pd.DataFrame(k_sweep_results)
 
-# Show fitted parameters table
-print('=== Fitted Parameters by k (from cache) ===\n')
-print(k_sweep[['k', 'sigma_obs', 'sigma_prior', 'match_threshold', 'epsilon', 'gradient', 'gradient_error']].to_string(index=False))
+# Compute human targets from no-chat data
+HUMAN_SAME_NC = NOCHAT_HUMAN[('same_domain', 'high')] - NOCHAT_HUMAN[('same_domain', 'low')]
+HUMAN_DIFF_NC = NOCHAT_HUMAN[('different_domain', 'high')] - NOCHAT_HUMAN[('different_domain', 'low')]
+HUMAN_GRADIENT_NC = HUMAN_SAME_NC - HUMAN_DIFF_NC
+
+# Add gradient error relative to human
+k_sweep['gradient_error'] = np.abs(k_sweep['gradient'] - HUMAN_GRADIENT_NC)
+
+print('=== K-Sweep Results (unified params, no-chat) ===\n')
+print(f'Unified parameters: σ_prior={UNIFIED_PARAMS["sigma_prior"]:.2f}, τ={UNIFIED_PARAMS["match_threshold"]:.2f}, ε={UNIFIED_PARAMS["epsilon"]:.2f}\n')
+print(k_sweep[['k', 'same_effect', 'diff_effect', 'gradient', 'gradient_error', 'accuracy']].to_string(index=False, float_format='%.4f'))
 ```
 
 ```{python}
-#| fig-cap: "Supplementary: Model performance vs factor dimensionality"
-#| fig-width: 10
-#| fig-height: 4
+#| fig-cap: "Figure S3: Transfer effects as a function of factor dimensionality k"
+#| fig-width: 7
+#| fig-height: 5
 
-# Human targets (computed from data above)
-HUMAN_SAME = HUMAN_RATES[('same_domain', 'high')] - HUMAN_RATES[('same_domain', 'low')]
-HUMAN_DIFF = HUMAN_RATES[('different_domain', 'high')] - HUMAN_RATES[('different_domain', 'low')]
-HUMAN_GRADIENT = HUMAN_SAME - HUMAN_DIFF
+# Paper-style formatting
+plt.rcParams.update({
+    'font.size': 14,
+    'axes.labelsize': 16,
+    'xtick.labelsize': 13,
+    'ytick.labelsize': 13,
+    'legend.fontsize': 12,
+})
 
-fig = plt.figure(figsize=(10, 4))
-gs = gridspec.GridSpec(1, 2, width_ratios=[1.2, 1], wspace=0.3)
-
-# Panel A: Transfer effects
-ax1 = fig.add_subplot(gs[0])
+fig, ax = plt.subplots(figsize=(7, 5))
 k = k_sweep['k'].values
 
-ax1.plot(k, k_sweep['same_effect'], 'o-', color='#2166ac', linewidth=2,
-         markersize=6, label='Same-domain effect')
-ax1.plot(k, k_sweep['diff_effect'], 's-', color='#b2182b', linewidth=2,
-         markersize=6, label='Different-domain effect')
-ax1.plot(k, k_sweep['gradient'], '^-', color='#4d9221', linewidth=2,
-         markersize=6, label='Gradient (same - diff)')
+ax.plot(k, k_sweep['same_effect'], 'o-', color='#2166ac', linewidth=2.5,
+        markersize=8, label='Same-domain effect')
+ax.plot(k, k_sweep['diff_effect'], 's-', color='#b2182b', linewidth=2.5,
+        markersize=8, label='Different-domain effect')
+ax.plot(k, k_sweep['gradient'], '^-', color='#4d9221', linewidth=2.5,
+        markersize=8, label='Gradient (same − diff)')
 
-# Human targets as horizontal lines
-ax1.axhline(HUMAN_SAME, color='#2166ac', linestyle='--', alpha=0.5, linewidth=1.5)
-ax1.axhline(HUMAN_DIFF, color='#b2182b', linestyle='--', alpha=0.5, linewidth=1.5)
-ax1.axhline(HUMAN_GRADIENT, color='#4d9221', linestyle='--', alpha=0.5, linewidth=1.5)
+# Human targets as dashed lines (extend only to right edge of data)
+ax.hlines(HUMAN_SAME_NC, 0, max(k), color='#2166ac', linestyle='--', alpha=0.6, linewidth=1.5)
+ax.hlines(HUMAN_DIFF_NC, 0, max(k), color='#b2182b', linestyle='--', alpha=0.6, linewidth=1.5)
+ax.hlines(HUMAN_GRADIENT_NC, 0, max(k), color='#4d9221', linestyle='--', alpha=0.6, linewidth=1.5)
 
-ax1.text(max(k) + 0.5, HUMAN_SAME, 'Human', fontsize=8, va='center', color='#2166ac', alpha=0.7)
-ax1.text(max(k) + 0.5, HUMAN_DIFF, 'Human', fontsize=8, va='center', color='#b2182b', alpha=0.7)
-ax1.text(max(k) + 0.5, HUMAN_GRADIENT, 'Human', fontsize=8, va='center', color='#4d9221', alpha=0.7)
+ax.set_xlabel('Number of factors (k)')
+ax.set_ylabel('Effect magnitude')
+ax.legend(loc='upper right', frameon=False)
+ax.set_xlim(0, max(k) + 1)
+ax.axhline(0, color='gray', linewidth=0.5, alpha=0.5)
 
-ax1.set_xlabel('Number of factors (k)')
-ax1.set_ylabel('Effect magnitude')
-ax1.set_title('A. Transfer effects by dimensionality', fontweight='bold')
-ax1.legend(loc='upper right', fontsize=9)
-ax1.set_xlim(-0.5, max(k) + 3)
-ax1.set_ylim(-0.02, 0.18)
-ax1.axhline(0, color='gray', linewidth=0.5, alpha=0.5)
-
-# Highlight optimal k (closest gradient to human)
+# Highlight optimal k
 best_k = k_sweep.loc[k_sweep['gradient_error'].idxmin(), 'k']
-ax1.axvline(best_k, color='gray', linestyle=':', alpha=0.5)
-ax1.text(best_k, ax1.get_ylim()[1] * 0.95, f'k={int(best_k)}', ha='center', fontsize=9, color='gray')
-
-# Panel B: Accuracy and Log-likelihood
-ax2 = fig.add_subplot(gs[1])
-ax2.plot(k, k_sweep['accuracy'] * 100, 'o-', color='#762a83', linewidth=2,
-         markersize=6, label='Accuracy (%)')
-ax2.set_xlabel('Number of factors (k)')
-ax2.set_ylabel('Accuracy (%)', color='#762a83')
-ax2.tick_params(axis='y', labelcolor='#762a83')
-ax2.set_title('B. Model fit by dimensionality', fontweight='bold')
-
-ax2b = ax2.twinx()
-ax2b.plot(k, k_sweep['log_likelihood'], 's-', color='#1b7837', linewidth=2,
-          markersize=6, label='Log-likelihood')
-ax2b.set_ylabel('Log-likelihood', color='#1b7837')
-ax2b.tick_params(axis='y', labelcolor='#1b7837')
-
-lines1, labels1 = ax2.get_legend_handles_labels()
-lines2, labels2 = ax2b.get_legend_handles_labels()
-ax2.legend(lines1 + lines2, labels1 + labels2, loc='lower right', fontsize=9)
-ax2.axvline(best_k, color='gray', linestyle=':', alpha=0.5)
+ax.axvline(best_k, color='gray', linestyle=':', alpha=0.6, linewidth=1.5)
+ax.text(best_k + 0.5, 0.01, f'k={int(best_k)}', fontsize=12, color='gray')
 
 plt.tight_layout()
-plt.savefig(base_dir / 'outputs' / 'figures' / 'k_sweep.pdf', dpi=300, bbox_inches='tight')
+plt.savefig(base_dir / 'outputs' / 'figures' / 'figure_s3.pdf', dpi=300, bbox_inches='tight')
 plt.show()
 
-print(f'\nOptimal k by effect error: {int(best_k)}')
+# Summary statistics
+print(f'\n=== K-Sweep Summary ===')
+print(f'Human gradient: {HUMAN_GRADIENT_NC:.4f}')
+print(f'Optimal k: {int(best_k)}')
+for k_val in [1, 5, 35]:
+    row = k_sweep[k_sweep['k'] == k_val].iloc[0]
+    pct = row['gradient'] / HUMAN_GRADIENT_NC * 100
+    print(f"  k={k_val}: Gradient = +{row['gradient']:.3f} ({pct:.0f}% of human)")
 ```
 
-## 7. Summary Statistics
+## 7. Factor Structure (Supplementary)
+
+```{python}
+#| fig-cap: "Figure S2: Factor structure of the 35 survey questions"
+#| fig-width: 12
+#| fig-height: 5
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Load full loadings to compute eigenvalues for scree plot
+loadings_full = load_factor_loadings(k=35)
+eigenvalues = np.sum(loadings_full ** 2, axis=0)  # Variance per factor
+
+# Load k=5 for heatmap
+loadings_k5 = load_factor_loadings(k=5)
+loadings_k5[:, 2] *= -1  # Flip factor 3 sign for interpretability
+var_explained_k5 = np.sum(eigenvalues[:5]) / np.sum(eigenvalues) * 100
+
+# Reorder domains for interpretability: group worldview/values domains together
+# Original order: Arbitrary(0-5), Background(5-10), Identity(10-15), Morality(15-20), Politics(20-25), Preferences(25-30), Religion(30-35)
+# New order: Religion first, then Preferences (heavy F2), then other worldview domains
+domain_order = ['Religion', 'Preferences', 'Politics', 'Morality', 'Identity', 'Background', 'Arbitrary']
+original_ranges = {
+    'Arbitrary': (0, 5), 'Background': (5, 10), 'Identity': (10, 15),
+    'Morality': (15, 20), 'Politics': (20, 25), 'Preferences': (25, 30), 'Religion': (30, 35)
+}
+
+# Build reordering index: within each domain, sort by heaviest factor first, then by loading magnitude
+reorder_idx = []
+for domain in domain_order:
+    start, end = original_ranges[domain]
+    domain_qs = list(range(start, end))
+    if domain == 'Religion':
+        # Special case: sort by F3 loading (most negative/darkest blue first)
+        domain_qs.sort(key=lambda q: loadings_k5[q, 2])
+    elif domain == 'Politics':
+        # Special case: sort by F5 loading (most positive/darkest red first)
+        domain_qs.sort(key=lambda q: -loadings_k5[q, 4])
+    else:
+        # Sort by: (1) which factor has max loading, (2) magnitude of that loading (descending)
+        domain_qs.sort(key=lambda q: (np.argmax(np.abs(loadings_k5[q])), -np.max(np.abs(loadings_k5[q]))))
+    reorder_idx.extend(domain_qs)
+
+loadings_reordered = loadings_k5[reorder_idx]
+
+# Parallel analysis: eigenvalues from random data
+n_iter = 100
+n_obs = 500  # Approximate sample size
+n_vars = 35
+random_eigenvalues = np.zeros((n_iter, n_vars))
+for i in range(n_iter):
+    random_data = np.random.normal(0, 1, (n_obs, n_vars))
+    cov = np.corrcoef(random_data.T)
+    random_eigenvalues[i] = np.sort(np.linalg.eigvalsh(cov))[::-1]
+parallel_eigenvalues = np.mean(random_eigenvalues, axis=0)
+
+# Set up figure with larger fonts
+plt.rcParams.update({'font.size': 14})
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+# --- Panel A: Scree plot with parallel analysis ---
+ax1.plot(range(1, 36), eigenvalues, 'o-', color='#2c3e50', linewidth=2, markersize=7, label='Observed')
+ax1.plot(range(1, 36), parallel_eigenvalues, 's--', color='#95a5a6', linewidth=1.5, markersize=5, label='Parallel analysis')
+ax1.axvline(5, color='#e74c3c', linestyle=':', linewidth=1.5, alpha=0.7)
+ax1.fill_between(range(1, 6), 0, eigenvalues[:5], alpha=0.2, color='#3498db')
+ax1.set_xlabel('Factor', fontsize=16)
+ax1.set_ylabel('Eigenvalue', fontsize=16)
+ax1.text(-0.1, 1.05, 'A', transform=ax1.transAxes, fontsize=20, fontweight='bold', va='bottom')
+ax1.set_xlim(0, 36)
+ax1.set_ylim(0, None)
+ax1.tick_params(labelsize=13)
+ax1.legend(loc='upper right', fontsize=12, frameon=False)
+ax1.text(6, eigenvalues[4] + 0.5, f'k=5\n({var_explained_k5:.0f}%)', fontsize=13, va='bottom')
+
+# --- Panel B: Factor loadings heatmap (reordered) ---
+# Clip color scale to make weaker loadings more visible
+im = ax2.imshow(loadings_reordered.T, aspect='auto', cmap='RdBu_r', vmin=-0.6, vmax=0.6)
+
+ax2.set_xlabel('Question', fontsize=16)
+ax2.set_ylabel('Factor', fontsize=16)
+ax2.text(-0.1, 1.05, 'B', transform=ax2.transAxes, fontsize=20, fontweight='bold', va='bottom')
+
+ax2.set_xticks(np.arange(0, 35, 5))
+ax2.set_xticklabels(np.arange(1, 36, 5), fontsize=13)
+ax2.set_yticks(np.arange(5))
+ax2.set_yticklabels([f'F{i+1}' for i in range(5)], fontsize=13)
+
+cbar = plt.colorbar(im, ax=ax2, shrink=0.8)
+cbar.set_label('Loading', fontsize=14)
+cbar.ax.tick_params(labelsize=12)
+
+# Domain boundaries and labels (reordered)
+domain_boundaries = [0, 5, 10, 15, 20, 25, 30, 35]
+for boundary in domain_boundaries[1:-1]:
+    ax2.axvline(boundary - 0.5, color='black', linewidth=1)
+
+for i, name in enumerate(domain_order):
+    mid = (domain_boundaries[i] + domain_boundaries[i+1]) / 2 - 0.5
+    ax2.text(mid, -0.8, name, ha='center', va='bottom', fontsize=10, fontweight='bold', rotation=45)
+
+plt.tight_layout()
+plt.savefig(base_dir / 'outputs' / 'figures' / 'figure_s2.pdf', dpi=300, bbox_inches='tight')
+plt.show()
+
+print(f'\nFigure S2 saved. Variance explained by k=5 factors: {var_explained_k5:.1f}%')
+```
+
+## 8. Summary Statistics
 
 ```{python}
 print('=== Key Results Summary (no-chat condition) ===\n')

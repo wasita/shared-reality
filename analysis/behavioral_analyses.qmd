@@ -111,32 +111,82 @@ df_pd.to_csv('/tmp/main_df.csv', index=False)
 
 ## 2. Manipulation Check
 
-Paper reports: "85% of participants who were assigned to talk about a belief that they actually had in common judged that belief to be shared, compared to only 29%" (p.6)
+Participants should accurately perceive agreement/disagreement on the focal topic. Paper reports the 2×2 breakdown: "judging it as shared far more often when they actually agreed (79% observation-only, 89% chat) than when they disagreed (19% observation-only, 38% chat)."
 
 ```{python}
-# Filter to observed question only
+# Filter to observed/focal question only
 obs_df = df_pd[df_pd['question'] == df_pd['matchedIdx']]
 
-# Percentages
-shared_pct = obs_df[obs_df['stance'] == 'shared']['predictShared'].mean() * 100
-opposing_pct = obs_df[obs_df['stance'] == 'opposing']['predictShared'].mean() * 100
+print('=== Manipulation Check: P(judged shared) on FOCAL question ===\n')
 
-print(f'Shared stance: {shared_pct:.0f}% judged belief as shared')
-print(f'Opposing stance: {opposing_pct:.0f}% judged belief as shared')
-print(f'\nPaper reports: 85% vs 29%')
+# 2x2 table
+print('                        Actual Stance')
+print('                   Shared          Opposing')
+print('Interaction    (high-match)     (low-match)')
+print('-' * 50)
+
+manip_results = []
+for exp in ['no-chat', 'chat']:
+    for stance in ['shared', 'opposing']:
+        cell = obs_df[(obs_df['experiment'] == exp) & (obs_df['stance'] == stance)]
+        n = len(cell)
+        p_shared = cell['predictShared'].mean()
+        manip_results.append({
+            'experiment': exp,
+            'stance': stance,
+            'n': n,
+            'p_shared': p_shared
+        })
+
+manip_df = pd.DataFrame(manip_results)
+
+for exp in ['no-chat', 'chat']:
+    exp_data = manip_df[manip_df['experiment'] == exp]
+    shared = exp_data[exp_data['stance'] == 'shared'].iloc[0]
+    opposing = exp_data[exp_data['stance'] == 'opposing'].iloc[0]
+    label = "No-Chat" if exp == 'no-chat' else "Chat"
+    print(f"{label:12}   {shared['p_shared']*100:5.1f}% (n={int(shared['n'])})   {opposing['p_shared']*100:5.1f}% (n={int(opposing['n'])})")
+
+print('-' * 50)
+
+# Discrimination by condition
+print('\n=== Discrimination (Shared - Opposing) ===\n')
+for exp in ['no-chat', 'chat']:
+    exp_data = manip_df[manip_df['experiment'] == exp]
+    p_shared = exp_data[exp_data['stance'] == 'shared']['p_shared'].values[0]
+    p_opposing = exp_data[exp_data['stance'] == 'opposing']['p_shared'].values[0]
+    discrim = p_shared - p_opposing
+    label = "No-Chat" if exp == 'no-chat' else "Chat"
+    print(f"{label:12}: {discrim*100:+.1f} percentage points")
+
+print('\n→ Both conditions show strong discrimination')
+print('→ Chat elevates commonality judgments in BOTH cells')
+print('  (even when partners disagreed, conversation led to perceiving more common ground)')
 ```
 
 ```{python}
-#| fig-width: 5
+#| fig-width: 8
 #| fig-height: 4
-fig, ax = plt.subplots(figsize=(5, 4))
-sns.barplot(data=obs_df, x='stance', y='predictShared', order=['opposing', 'shared'],
-            hue='stance', palette=lowhigh_palette, ax=ax)
-ax.set_xlabel('Stance Condition')
-ax.set_ylabel('Commonality Judgment')
-ax.set_ylim([0, 1])
+fig, axes = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
+
+for i, exp in enumerate(['no-chat', 'chat']):
+    ax = axes[i]
+    exp_data = obs_df[obs_df['experiment'] == exp]
+    sns.barplot(data=exp_data, x='stance', y='predictShared', order=['opposing', 'shared'],
+                hue='stance', palette=lowhigh_palette, ax=ax, legend=False)
+    ax.set_xlabel('Stance Condition')
+    ax.set_ylabel('P(judged shared)' if i == 0 else '')
+    ax.set_ylim([0, 1])
+    ax.set_title(exp.replace('-', ' ').title(), fontweight='bold')
+
+    # Add N labels
+    for j, stance in enumerate(['opposing', 'shared']):
+        n = len(exp_data[exp_data['stance'] == stance])
+        ax.text(j, 0.05, f'n={n}', ha='center', fontsize=9, color='white')
+
 sns.despine()
-plt.title('Manipulation Check')
+plt.suptitle('Manipulation Check: Focal Question', fontweight='bold', y=1.02)
+plt.tight_layout()
 if SAVE_FIGURES:
     plt.savefig(figures_dir / 'manipulation_check.pdf', dpi=300, bbox_inches='tight')
 plt.show()
@@ -223,23 +273,96 @@ summary(model)
 confint(model, method = "Wald")
 ```
 
-## 5. Distance-Commonality (Figure 5 SI)
+## 5. Distance-Commonality (Figure S1)
 
 Paper reports: distance β = −1.32, CI [−1.36, −1.29]; distance × experiment β = −0.32, CI [−0.36, −0.29] (p.6)
 
+Commonality expectations as a function of predicted distance between partner and self. Fill color indicates stance (pink is shared, blue is opposing) and panel position indicates interaction type (left is imagined, right is real).
+
 ```{python}
-#| fig-cap: "Figure 5 (SI): Distance-commonality"
+#| fig-cap: "Figure S1: Commonality expectations as a function of predicted distance"
 #| fig-width: 10
-#| fig-height: 4
+#| fig-height: 5
+
+# Aggregate by participant first
 inf_grouped = inf_df.groupby(['experiment', 'stance', 'pid', 'distance'])['predictShared'].mean().reset_index()
-g = sns.FacetGrid(data=inf_grouped, col='experiment', col_order=['no-chat', 'chat'], height=4)
-g.map_dataframe(sns.barplot, x='distance', y='predictShared', hue='stance', palette=lowhigh_palette);
-g.set_axis_labels('|Prediction - Own Response|', 'Expected Commonality', fontweight='bold');
-g.set_titles('{col_name}');
-plt.ylim([0, 1])
-if SAVE_FIGURES:
-    plt.savefig(figures_dir / 'figure5_distance.pdf', dpi=300, bbox_inches='tight')
+
+# Bootstrap CI function
+def bootstrap_ci(data, n_boot=1000, ci=95):
+    boot_means = [np.random.choice(data, size=len(data), replace=True).mean() for _ in range(n_boot)]
+    lower = np.percentile(boot_means, (100 - ci) / 2)
+    upper = np.percentile(boot_means, 100 - (100 - ci) / 2)
+    return lower, upper
+
+# Compute means and CIs
+summary_data = []
+for exp in ['no-chat', 'chat']:
+    for stance in ['opposing', 'shared']:
+        for dist in range(5):
+            subset = inf_grouped[(inf_grouped['experiment'] == exp) &
+                                  (inf_grouped['stance'] == stance) &
+                                  (inf_grouped['distance'] == dist)]['predictShared']
+            if len(subset) > 0:
+                mean_val = subset.mean()
+                ci_low, ci_high = bootstrap_ci(subset.values)
+                summary_data.append({
+                    'experiment': exp, 'stance': stance, 'distance': dist,
+                    'mean': mean_val, 'ci_low': ci_low, 'ci_high': ci_high
+                })
+
+summary_df = pd.DataFrame(summary_data)
+
+# Create figure
+fig, axes = plt.subplots(1, 2, figsize=(10, 5), sharey=True)
+plt.rcParams.update({'font.size': 12})
+
+exp_labels = {'no-chat': 'Imagined', 'chat': 'Real'}
+stance_colors = {'opposing': '#648FFF', 'shared': '#DC267F'}  # blue, pink
+
+for i, exp in enumerate(['no-chat', 'chat']):
+    ax = axes[i]
+    exp_data = summary_df[summary_df['experiment'] == exp]
+
+    bar_width = 0.35
+    x = np.arange(5)
+
+    for j, stance in enumerate(['opposing', 'shared']):
+        stance_data = exp_data[exp_data['stance'] == stance].sort_values('distance')
+        offset = -bar_width/2 if stance == 'opposing' else bar_width/2
+
+        bars = ax.bar(x + offset, stance_data['mean'], bar_width,
+                      color=stance_colors[stance], alpha=0.8,
+                      label=stance.capitalize() if i == 1 else '')
+
+        # Error bars - no caps
+        ax.errorbar(x + offset, stance_data['mean'],
+                    yerr=[stance_data['mean'] - stance_data['ci_low'],
+                          stance_data['ci_high'] - stance_data['mean']],
+                    fmt='none', color='black', capsize=0, linewidth=1.5)
+
+    ax.set_xlabel('Predicted Distance\n(|Prediction for Partner − Own|)', fontsize=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels(['0', '1', '2', '3', '4'], fontsize=12)
+    ax.set_ylim([0, 1])
+    ax.set_yticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    ax.text(-0.1, 1.05, chr(65 + i), transform=ax.transAxes, fontsize=16, fontweight='bold', va='bottom')
+    ax.set_title(exp_labels[exp], fontsize=14, fontweight='bold')
+    ax.tick_params(labelsize=11)
+    ax.grid(False)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    if i == 0:
+        ax.set_ylabel('Commonality Expectation', fontsize=14)
+    if i == 1:
+        ax.legend(title='Stance', frameon=False, loc='upper right', fontsize=11)
+
+plt.tight_layout()
+plt.savefig(figures_dir / 'figure_s1.pdf', dpi=300, bbox_inches='tight')
+plt.savefig(figures_dir / 'figure_s1.png', dpi=150, bbox_inches='tight')
 plt.show()
+
+print(f'\nFigure S1 saved to {figures_dir / "figure_s1.pdf"}')
 ```
 
 ```{python}

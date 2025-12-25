@@ -74,13 +74,36 @@ def _project_to_factors(responses, loadings, means):
 
 
 @jit
-def _posterior_update(L_obs, r_obs, mu_obs, prior_mean, prior_precision, obs_variance):
+def _posterior_update_delta(L_obs, r_obs, mu_obs, prior_mean, prior_cov):
     """
-    Bayesian update: P(θ | r_obs) ∝ P(r_obs | θ) P(θ)
+    Bayesian update with delta function observation (exact, no noise).
 
-    Returns posterior mean and covariance.
+    Uses Kalman-style update in the infinite precision limit.
+    Appropriate for no-chat condition where observations are explicit.
     """
     r_centered = r_obs - mu_obs
+
+    # Kalman gain: K = Σ_prior @ L / (L' @ Σ_prior @ L)
+    L_cov_L = L_obs @ prior_cov @ L_obs  # scalar: L'ΣL
+    K = prior_cov @ L_obs / (L_cov_L + 1e-10)  # (k,) vector
+    innovation = r_centered - L_obs @ prior_mean
+    post_mean = prior_mean + K * innovation
+
+    # Posterior covariance: Σ_post = Σ_prior - K @ L' @ Σ_prior
+    post_cov = prior_cov - jnp.outer(K, L_obs @ prior_cov)
+
+    return post_mean, post_cov
+
+
+@jit
+def _posterior_update_gaussian(L_obs, r_obs, mu_obs, prior_mean, prior_cov, obs_variance):
+    """
+    Standard Bayesian update with Gaussian observation noise.
+
+    Appropriate for chat condition where observations are inferred from conversation.
+    """
+    r_centered = r_obs - mu_obs
+    prior_precision = jnp.linalg.inv(prior_cov)
     obs_precision = jnp.outer(L_obs, L_obs) / obs_variance
     post_precision = prior_precision + obs_precision
     post_cov = jnp.linalg.inv(post_precision)
@@ -107,23 +130,37 @@ def _predict_match_probs(loadings, means, post_mean, post_cov, r_self, threshold
 @jit
 def _predict_bayesian(
     obs_q, r_obs, r_self, loadings, means,
-    prior_cov, prior_precision, obs_variance, threshold
+    prior_cov, obs_variance, threshold
 ):
-    """Bayesian factor model prediction for a single participant."""
+    """
+    Bayesian factor model prediction for a single participant.
+
+    When obs_variance=0: Uses delta function (exact observation, no noise).
+        Appropriate for no-chat condition where participants see explicit responses.
+    When obs_variance>0: Uses Gaussian observation model.
+        Appropriate for chat condition where responses are inferred from conversation.
+    """
     L_obs = loadings[obs_q]
     mu_obs = means[obs_q]
-
-    # Prior mean is 0 (population average)
     prior_mean = jnp.zeros(loadings.shape[1])
 
-    # Bayesian update
-    post_mean, post_cov = _posterior_update(
-        L_obs, r_obs, mu_obs, prior_mean, prior_precision, obs_variance
+    # Choose update based on obs_variance
+    post_mean, post_cov = jax.lax.cond(
+        obs_variance < 1e-8,
+        lambda _: _posterior_update_delta(L_obs, r_obs, mu_obs, prior_mean, prior_cov),
+        lambda _: _posterior_update_gaussian(L_obs, r_obs, mu_obs, prior_mean, prior_cov, obs_variance),
+        operand=None
     )
 
-    return _predict_match_probs(
-        loadings, means, post_mean, post_cov, r_self, threshold, obs_variance
-    )
+    # Predict match probabilities
+    pred_means = loadings @ post_mean + means
+    pred_vars = jnp.sum((loadings @ post_cov) * loadings, axis=1) + obs_variance
+    pred_vars = jnp.maximum(pred_vars, 1e-10)  # Numerical stability
+    pred_stds = jnp.sqrt(pred_vars)
+
+    upper = (r_self + threshold - pred_means) / pred_stds
+    lower = (r_self - threshold - pred_means) / pred_stds
+    return jnp.clip(jax_norm.cdf(upper) - jax_norm.cdf(lower), 0.0, 1.0)
 
 
 @jit
@@ -179,13 +216,13 @@ def _predict_similarity_projection(obs_q, r_obs, r_self, base_rate, projection_w
 @jit
 def _predict_single(
     obs_q, r_obs, r_self, loadings, means,
-    prior_cov, prior_precision, obs_variance, threshold,
+    prior_cov, obs_variance, threshold,
     lambda_mix, base_rate, projection_weight
 ):
     """Combined prediction: (1-λ) × Bayesian + λ × SimilarityProjection."""
     p_bayes = _predict_bayesian(
         obs_q, r_obs, r_self, loadings, means,
-        prior_cov, prior_precision, obs_variance, threshold
+        prior_cov, obs_variance, threshold
     )
     p_proj = _predict_similarity_projection(obs_q, r_obs, r_self, base_rate, projection_weight, threshold)
 
@@ -195,14 +232,14 @@ def _predict_single(
 @jit
 def _predict_batch(
     obs_qs, r_partners, r_selves, loadings, means,
-    prior_cov, prior_precision, obs_variance, threshold,
+    prior_cov, obs_variance, threshold,
     lambda_mix, base_rate, projection_weight
 ):
     """Batch prediction over participants using vmap."""
     return vmap(
         lambda oq, rp, rs: _predict_single(
             oq, rp, rs, loadings, means,
-            prior_cov, prior_precision, obs_variance, threshold,
+            prior_cov, obs_variance, threshold,
             lambda_mix, base_rate, projection_weight
         )
     )(obs_qs, r_partners, r_selves)
@@ -266,8 +303,11 @@ class CommonalityModel:
         Number of factors for Bayesian component (default 5)
     lambda_mix : float
         Mixture weight λ ∈ [0,1]. 0 = Bayesian, 1 = similarity projection.
-    sigma_obs, sigma_prior : float
-        Observation and prior noise standard deviations (Bayesian model)
+    sigma_obs : float
+        Observation noise standard deviation. Set to 0 for exact observations
+        (no-chat condition) or >0 for soft observations (chat condition).
+    sigma_prior : float
+        Prior noise standard deviation (Bayesian model)
     match_threshold : float
         τ for defining a "match" (|r_partner - r_self| ≤ τ)
     epsilon : float
@@ -286,7 +326,7 @@ class CommonalityModel:
         self,
         k: int = 5,
         lambda_mix: float = 0.0,
-        sigma_obs: float = 0.3,
+        sigma_obs: float = 0.0,  # 0 = exact obs (no-chat), >0 = soft obs (chat)
         sigma_prior: float = 2.0,
         match_threshold: float = 1.5,
         epsilon: float = 0.2,
@@ -316,8 +356,7 @@ class CommonalityModel:
         self._loadings = jnp.array(L)
         self._means = jnp.array(means)
         self._prior_cov = jnp.array(sigma_prior**2 * np.eye(k_eff))
-        self._prior_precision = jnp.array(np.eye(k_eff) / sigma_prior**2)
-        self._obs_variance = sigma_obs**2
+        self._obs_variance = jnp.array(sigma_obs**2)
         self._threshold = match_threshold
         self._lambda_mix = jnp.array(self.lambda_mix)
         self._base_rate = jnp.array(base_rate)
@@ -338,9 +377,8 @@ class CommonalityModel:
         preds = _predict_single(
             obs_q, r_partner, jnp.array(r_self),
             self._loadings, self._means,
-            self._prior_cov, self._prior_precision, self._obs_variance,
-            self._threshold, self._lambda_mix,
-            self._base_rate, self._projection_weight
+            self._prior_cov, self._obs_variance, self._threshold,
+            self._lambda_mix, self._base_rate, self._projection_weight
         )
         # Apply lapse rate
         preds = (1 - self.epsilon) * preds + self.epsilon * 0.5
@@ -364,9 +402,8 @@ class CommonalityModel:
             jnp.array(r_partners),
             jnp.array(r_selves),
             self._loadings, self._means,
-            self._prior_cov, self._prior_precision, self._obs_variance,
-            self._threshold, self._lambda_mix,
-            self._base_rate, self._projection_weight
+            self._prior_cov, self._obs_variance, self._threshold,
+            self._lambda_mix, self._base_rate, self._projection_weight
         )
         # Apply lapse rate
         preds = (1 - self.epsilon) * preds + self.epsilon * 0.5
@@ -472,68 +509,102 @@ def compute_gradient_error(pred_df: pd.DataFrame, human_rates: dict) -> float:
 
 
 def fit_parameters(
-    k: int,
+    k_values: list,
     eval_data: dict,
     human_rates: dict,
     lambda_mix: float = 0.0,
-    param_grid: dict = None,
+    verbose: bool = True,
 ) -> tuple[dict, dict]:
     """
-    Grid search for best model parameters at given k.
+    Fit model parameters by minimizing gradient error.
 
-    Minimizes gradient error (deviation from human transfer effects).
+    Pass k_values=[5] for k=5-optimal params, or k_values=[1,2,3,...] for
+    unified params that work across all k (fair for k-sweep comparison).
 
     Args:
-        k: Number of factors
+        k_values: List of k values to optimize over (single k or multiple for unified)
         eval_data: Output of prepare_evaluation_data()
         human_rates: Dict of human rates {(question_type, match_type): rate}
-        lambda_mix: Mixture weight λ ∈ [0,1]. 0 = Bayesian, 1 = similarity projection.
-        param_grid: Override default parameter grid
+        lambda_mix: Mixture weight λ ∈ [0,1]
+        verbose: Print optimization progress
 
     Returns:
-        (best_params, best_metrics) tuple
-    """
-    from itertools import product as iterproduct
+        (best_params, metrics) tuple
 
-    if param_grid is None:
-        param_grid = {
-            'sigma_obs': [0.2, 0.3, 0.4, 0.5],
-            'sigma_prior': [1.0, 1.5, 2.0, 3.0],
-            'match_threshold': [1.0, 1.5, 2.0],
-            'epsilon': [0.1, 0.2, 0.3, 0.4],
+    Note: σ_obs is fixed at 0 for no-chat data since observations are exact
+    (participants see explicit binary responses, not inferred from conversation).
+    """
+    from scipy.optimize import minimize
+
+    # Only fit 3 params; σ_obs = 0 for exact observations (no-chat condition)
+    bounds = {
+        'sigma_prior': (0.1, 5.0),
+        'match_threshold': (0.5, 4.0),
+        'epsilon': (0.01, 0.5),
+    }
+
+    param_names = ['sigma_prior', 'match_threshold', 'epsilon']
+    param_bounds = [bounds[p] for p in param_names]
+
+    # Initialize with reasonable values
+    x0 = np.array([1.5, 2.0, 0.1])
+
+    n_evals = [0]
+    def objective(x):
+        n_evals[0] += 1
+        sp, mt, eps = x
+        total_error = 0.0
+        for k in k_values:
+            model = CommonalityModel(
+                k=k, lambda_mix=lambda_mix,
+                sigma_obs=0.0,  # Delta function for no-chat (exact observations)
+                sigma_prior=sp, match_threshold=mt, epsilon=eps
+            )
+            pred_df = fast_evaluate(model, eval_data)
+            total_error += compute_gradient_error(pred_df, human_rates)
+        return total_error / len(k_values)  # Mean error across k
+
+    if verbose:
+        print(f"Optimizing params across k={k_values} (σ_obs=0 fixed)...")
+
+    result = minimize(
+        objective,
+        x0,
+        method='L-BFGS-B',
+        bounds=param_bounds,
+        options={'ftol': 1e-8, 'gtol': 1e-6, 'maxiter': 200}
+    )
+
+    if verbose:
+        print(f"  Converged: {result.success} after {n_evals[0]} evaluations")
+
+    best_params = {'sigma_obs': 0.0}  # Delta function (exact observations in no-chat)
+    best_params.update({p: float(result.x[i]) for i, p in enumerate(param_names)})
+
+    # Compute per-k metrics
+    metrics_by_k = {}
+    for k in k_values:
+        model = CommonalityModel(k=k, lambda_mix=lambda_mix, **best_params)
+        pred_df = fast_evaluate(model, eval_data)
+        probs = np.clip(pred_df["pred_prob"].values, 1e-10, 1-1e-10)
+        actual = pred_df["actual"].values
+
+        metrics_by_k[k] = {
+            'gradient_error': compute_gradient_error(pred_df, human_rates),
+            'log_likelihood': float(np.sum(actual * np.log(probs) + (1 - actual) * np.log(1 - probs))),
+            'accuracy': float(np.mean((probs > 0.5) == actual)),
         }
 
-    best_error = float('inf')
-    best_params = None
-    best_metrics = None
+    if verbose:
+        print(f"  Final: σ_prior={best_params['sigma_prior']:.4f}, "
+              f"τ={best_params['match_threshold']:.4f}, ε={best_params['epsilon']:.4f}")
+        print(f"  Mean gradient error: {result.fun:.6f}")
 
-    for so, sp, mt, eps in iterproduct(
-        param_grid['sigma_obs'], param_grid['sigma_prior'],
-        param_grid['match_threshold'], param_grid['epsilon']
-    ):
-        model = CommonalityModel(
-            k=k, lambda_mix=lambda_mix,
-            sigma_obs=so, sigma_prior=sp, match_threshold=mt, epsilon=eps
-        )
-        pred_df = fast_evaluate(model, eval_data)
-        error = compute_gradient_error(pred_df, human_rates)
-
-        if error < best_error:
-            best_error = error
-            best_params = {
-                'sigma_obs': so, 'sigma_prior': sp,
-                'match_threshold': mt, 'epsilon': eps
-            }
-            # Compute full metrics for best model
-            probs = np.clip(pred_df["pred_prob"].values, 1e-10, 1-1e-10)
-            actual = pred_df["actual"].values
-            best_metrics = {
-                'gradient_error': error,
-                'log_likelihood': float(np.sum(actual * np.log(probs) + (1 - actual) * np.log(1 - probs))),
-                'accuracy': float(np.mean((probs > 0.5) == actual)),
-            }
-
-    return best_params, best_metrics
+    return best_params, {
+        'mean_gradient_error': float(result.fun),
+        'by_k': metrics_by_k,
+        'optimizer_success': result.success,
+    }
 
 
 def fast_evaluate(model: CommonalityModel, eval_data: dict) -> pd.DataFrame:
