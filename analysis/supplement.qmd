@@ -352,7 +352,7 @@ for qt in ['same_domain', 'different_domain']:
 
 # Load fitted parameters (same as model_analyses.qmd)
 import json
-params_path = base_dir / 'data' / 'fitted_params.json'
+params_path = base_dir / 'models' / 'fitted_params.json'
 with open(params_path) as f:
     fitted_cache = json.load(f)
 UNIFIED_PARAMS = {**fitted_cache['unified_params'], 'lambda_mix': 0.0}

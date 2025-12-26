@@ -193,7 +193,7 @@ for qt in ['observed', 'same_domain', 'different_domain']:
 K_VALUES = [1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 35]
 
 # Check if cached params exist and are valid
-params_path = base_dir / 'data' / 'fitted_params.json'
+params_path = base_dir / 'models' / 'fitted_params.json'
 refit = False
 
 if params_path.exists():
