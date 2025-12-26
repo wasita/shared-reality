@@ -164,32 +164,6 @@ print('→ Chat elevates commonality judgments in BOTH cells')
 print('  (even when partners disagreed, conversation led to perceiving more common ground)')
 ```
 
-```{python}
-#| fig-width: 8
-#| fig-height: 4
-fig, axes = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
-
-for i, exp in enumerate(['no-chat', 'chat']):
-    ax = axes[i]
-    exp_data = obs_df[obs_df['experiment'] == exp]
-    sns.barplot(data=exp_data, x='stance', y='predictShared', order=['opposing', 'shared'],
-                hue='stance', palette=lowhigh_palette, ax=ax, legend=False)
-    ax.set_xlabel('Stance Condition')
-    ax.set_ylabel('P(judged shared)' if i == 0 else '')
-    ax.set_ylim([0, 1])
-    ax.set_title(exp.replace('-', ' ').title(), fontweight='bold')
-
-    # Add N labels
-    for j, stance in enumerate(['opposing', 'shared']):
-        n = len(exp_data[exp_data['stance'] == stance])
-        ax.text(j, 0.05, f'n={n}', ha='center', fontsize=9, color='white')
-
-sns.despine()
-plt.suptitle('Manipulation Check: Focal Question', fontweight='bold', y=1.02)
-plt.tight_layout()
-plt.show()
-```
-
 ## 3. Generalization Gradient (Figure 2A)
 
 Paper reports: stance × question type interaction β = 0.54, 95% CI [0.48, 0.59] (p.8-9)
