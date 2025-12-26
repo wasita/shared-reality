@@ -22,6 +22,10 @@ __pycache__/
 
 # LLM batch artifacts (regenerate from code)
 models/llm/batch_requests/
+data/llm_results/*.jsonl
+
+# Rendered analysis output
+analysis/*.pdf
 
 # LaTeX
 *.log
