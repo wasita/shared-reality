@@ -742,11 +742,14 @@ results <- results %>%
         TRUE ~ ''
     ))
 
-# Format for display
+# Format for display - pivot and reorder columns correctly
 results_wide <- results %>%
     mutate(beta_sig = sprintf('%.2f%s', beta, sig)) %>%
     select(matchedDomain, category, stance, beta_sig) %>%
-    pivot_wider(names_from = c(stance, category), values_from = beta_sig)
+    pivot_wider(names_from = c(stance, category), values_from = beta_sig) %>%
+    select(matchedDomain,
+           opposing_sameQ, opposing_sameD, opposing_diffD,
+           shared_sameQ, shared_sameD, shared_diffD)
 
 knitr::kable(results_wide, col.names = c('Domain', 'Opp-Focal', 'Opp-Same', 'Opp-Diff', 'Shared-Focal', 'Shared-Same', 'Shared-Diff'))
 
