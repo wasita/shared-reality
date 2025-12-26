@@ -532,47 +532,26 @@ base_dir = Path('/Users/rxdh/Repos/shared-reality')
 data_dir = base_dir / 'data'
 figures_dir = base_dir / 'outputs' / 'figures'
 
-# Colors
-COLOR_POP = '#648FFF'
-COLOR_SELF = '#DC267F'
+import sys
+sys.path.insert(0, str(base_dir))
+from analysis.utils import (
+    compute_gradient,
+    bootstrap_gradient,
+    compute_all_self_structure_gradients,
+    COLORS,
+)
 
-# Domain ranges
-DOMAIN_RANGES = {
-    'arbitrary': (0, 5), 'background': (5, 10), 'identity': (10, 15),
-    'morality': (15, 20), 'politics': (20, 25), 'preferences': (25, 30),
-    'religion': (30, 35),
-}
-
-# Load responses
+# Load responses and compute self-structure gradients
 responses_df = pd.read_csv(data_dir / 'responses.csv', low_memory=False)
 response_matrix = responses_df.pivot_table(
     index='pid', columns='question', values='preChatResponse', aggfunc='first'
 )
-
-def compute_self_structure_gradient(responses):
-    """Compute within - cross domain similarity from individual responses."""
-    within_sims, cross_sims = [], []
-    for d, (start, end) in DOMAIN_RANGES.items():
-        for i in range(start, end):
-            for j in range(i+1, end):
-                within_sims.append(1 - abs(responses[i] - responses[j]) / 4.0)
-        for d2, (s2, e2) in DOMAIN_RANGES.items():
-            if d != d2:
-                for i in range(start, end):
-                    for j in range(s2, e2):
-                        cross_sims.append(1 - abs(responses[i] - responses[j]) / 4.0)
-    return np.mean(within_sims) - np.mean(cross_sims)
-
-# Compute self-structure for each participant
-structure_gradients = {}
-for pid in response_matrix.index:
-    responses = response_matrix.loc[pid].values
-    structure_gradients[pid] = compute_self_structure_gradient(responses)
+structure_gradients = compute_all_self_structure_gradients(response_matrix)
 
 all_grads = list(structure_gradients.values())
 q25 = np.percentile(all_grads, 25)
 
-# Load behavioral data
+# Classify participants
 nochat_data = responses_df[responses_df['experiment'] == 'no-chat'].copy()
 nochat_data['self_structure_gradient'] = nochat_data['pid'].map(structure_gradients)
 nochat_data['is_anomaly'] = nochat_data['self_structure_gradient'] < q25
@@ -581,53 +560,29 @@ n_normal = nochat_data[~nochat_data['is_anomaly']]['pid'].nunique()
 n_anomaly = nochat_data[nochat_data['is_anomaly']]['pid'].nunique()
 
 # Compute behavioral gradients
-def compute_group_gradient(df, col):
-    rates = {}
-    for qt in ['same_domain', 'different_domain']:
-        for mt in ['high', 'low']:
-            cell = df[(df['question_type'] == qt) & (df['match_type'] == mt)]
-            rates[(qt, mt)] = cell[col].mean() if len(cell) > 0 else np.nan
-    if any(pd.isna(v) for v in rates.values()):
-        return np.nan
-    return (rates[('same_domain', 'high')] - rates[('same_domain', 'low')]) - \
-           (rates[('different_domain', 'high')] - rates[('different_domain', 'low')])
-
 normal_data = nochat_data[~nochat_data['is_anomaly']]
 anomaly_data = nochat_data[nochat_data['is_anomaly']]
 
-normal_gradient = compute_group_gradient(normal_data, 'participant_binary_prediction')
-anomaly_gradient = compute_group_gradient(anomaly_data, 'participant_binary_prediction')
+normal_gradient = compute_gradient(normal_data, 'participant_binary_prediction')
+anomaly_gradient = compute_gradient(anomaly_data, 'participant_binary_prediction')
 
 # Bootstrap CIs
-def bootstrap_gradient(df, col, n_boot=1000, seed=42):
-    np.random.seed(seed)
-    grads = []
-    pids = df['pid'].unique()
-    for _ in range(n_boot):
-        boot_pids = np.random.choice(pids, size=len(pids), replace=True)
-        boot_df = df[df['pid'].isin(boot_pids)]
-        g = compute_group_gradient(boot_df, col)
-        if not np.isnan(g):
-            grads.append(g)
-    return np.array(grads)
-
 normal_boots = bootstrap_gradient(normal_data, 'participant_binary_prediction')
 anomaly_boots = bootstrap_gradient(anomaly_data, 'participant_binary_prediction')
 
 # Create figure
-plt.rcParams['font.family'] = 'Helvetica Neue'
-plt.rcParams['axes.spines.top'] = False
-plt.rcParams['axes.spines.right'] = False
+from analysis.utils import set_plot_style
+set_plot_style()
 
 fig, axes = plt.subplots(1, 2, figsize=(9, 4))
 
 # Panel A: Distribution
 ax = axes[0]
-ax.hist(all_grads, bins=25, color=COLOR_POP, alpha=0.8, edgecolor='white', linewidth=0.5)
-ax.axvline(q25, color=COLOR_SELF, linestyle='--', linewidth=2,
+ax.hist(all_grads, bins=25, color=COLORS['bayesian'], alpha=0.8, edgecolor='white', linewidth=0.5)
+ax.axvline(q25, color=COLORS['high'], linestyle='--', linewidth=2,
            label=f'Bottom quartile\n(N={n_anomaly})')
 ax.axvline(0, color='gray', linestyle=':', linewidth=1, alpha=0.7)
-ax.axvspan(min(all_grads) - 0.01, q25, alpha=0.15, color=COLOR_SELF)
+ax.axvspan(min(all_grads) - 0.01, q25, alpha=0.15, color=COLORS['high'])
 ax.set_xlabel('Self-structure gradient\n(within − cross domain similarity)', fontsize=11)
 ax.set_ylabel('Number of participants', fontsize=11)
 ax.set_title('A', fontweight='bold', loc='left', fontsize=14)
@@ -641,9 +596,9 @@ normal_err = [[normal_gradient - np.percentile(normal_boots, 2.5)],
 anomaly_err = [[anomaly_gradient - np.percentile(anomaly_boots, 2.5)],
                [np.percentile(anomaly_boots, 97.5) - anomaly_gradient]]
 
-ax.bar([0], [normal_gradient], width=width, color=COLOR_POP,
+ax.bar([0], [normal_gradient], width=width, color=COLORS['bayesian'],
        yerr=normal_err, capsize=4, error_kw={'linewidth': 1.5})
-ax.bar([1], [anomaly_gradient], width=width, color=COLOR_SELF,
+ax.bar([1], [anomaly_gradient], width=width, color=COLORS['high'],
        yerr=anomaly_err, capsize=4, error_kw={'linewidth': 1.5})
 ax.axhline(0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
 
