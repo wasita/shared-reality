@@ -82,7 +82,7 @@ def create_chat_timecourse_batch(prompt_type: str = "pshared",
     Returns:
         List of batch request dicts
     """
-    messages = pd.read_csv(DATA_DIR / "chat_messages.csv")
+    messages = pd.read_csv(DATA_DIR / "messages.csv")
     messages['absolute_timestamp'] = pd.to_datetime(messages['absolute_timestamp'], format='mixed')
     messages['start_time'] = pd.to_datetime(messages['start_time'], format='mixed')
     questions = load_questions()
@@ -288,7 +288,7 @@ def compute_pshared_metrics(results: list) -> pd.DataFrame:
     Returns:
         DataFrame with predicted vs actual agreement by group/time/question
     """
-    messages = pd.read_csv(DATA_DIR / "chat_messages.csv")
+    messages = pd.read_csv(DATA_DIR / "messages.csv")
     unified = load_unified_data()
     questions = load_questions()
 
@@ -411,7 +411,7 @@ def compute_pshared_metrics(results: list) -> pd.DataFrame:
 def cmd_submit(args):
     """Submit batch job."""
     if args.sample:
-        messages = pd.read_csv(DATA_DIR / "chat_messages.csv")
+        messages = pd.read_csv(DATA_DIR / "messages.csv")
         sample_groups = list(messages['group_id'].unique()[:args.sample])
         print(f"Using sample of {len(sample_groups)} groups")
     else:

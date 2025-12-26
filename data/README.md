@@ -39,7 +39,7 @@ The 35 survey questions used in the study.
 | `text` | Question text |
 | `domain` | Domain category (7 domains, 5 questions each) |
 
-### `chat_messages.csv`
+### `messages.csv`
 Conversation transcripts from the chat condition.
 
 | Column | Description |
