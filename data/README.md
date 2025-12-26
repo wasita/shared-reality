@@ -1,6 +1,6 @@
 # Data Documentation
 
-This folder contains the behavioral data from the shared reality experiments.
+This folder contains the behavioral data from our experiments.
 
 ## Files
 
