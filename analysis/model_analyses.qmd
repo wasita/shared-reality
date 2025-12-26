@@ -12,15 +12,16 @@ execute:
   message: false
 ---
 
-This document reproduces the computational model analyses and Figure 4 from the paper.
+This document reproduces the main computational model analyses and Figure 4 from the paper.
 
 1. **Setup** - Load model and data
 2. **Parameter Fitting** - Grid search over (σ_obs, σ_prior, τ, ε)
 3. **Model Comparison** - Nested model evaluation
 4. **Figure 4** - Main model figure
 5. **LLM Analysis** - Pre-computed LLM predictions
-6. **K-Sweep** - Model performance by factor dimensionality
-7. **Summary** - Key statistics
+6. **Summary** - Key statistics
+
+See `supplement.qmd` for supplementary analyses (k-sweep, factor structure, scrambled control).
 
 ## 1. Setup
 
@@ -617,242 +618,195 @@ for _, row in final_bin.iterrows():
     print(f"  {row['match_type']} / {row['question_category']}: {row['accuracy_pct']:.1f}%")
 ```
 
-## 6. K-Sweep Analysis (Supplementary)
+### LLM P(shared) Timecourse (Main Text Figure)
 
-Model performance as a function of factor dimensionality k. To isolate the effect of
-dimensionality, we use **fixed parameters** across all k values (from the main k=5 model)
-and evaluate on the **no-chat condition** (information-matched to the Bayesian model).
-
-Note: We start from k=1 (first principal component) rather than k=0. A k=0 model with
-flat loadings still produces spurious gradients because P(match) depends on self-response
-similarity, and people's responses are more correlated within domains than across. This
-confound makes k=0 unsuitable as a null model for testing factor dimensionality.
+This figure shows how the LLM's predicted P(shared) evolves over the course of conversation. The key finding is that same-domain generalization emerges: P(shared) rises for high-match pairs and falls for low-match pairs, with the effect spreading from the focal topic to same-domain questions. Dashed lines show human P(shared) judgments for comparison.
 
 ```{python}
-import matplotlib.gridspec as gridspec
+#| fig-cap: "Figure 5: LLM recovers structured generalization from conversation transcripts"
+#| fig-width: 9
+#| fig-height: 4
 
-# Use UNIFIED_PARAMS for k-sweep (fair comparison - no k is favored)
-# nochat_data and nochat_eval already defined in Section 2
+# Load P(shared) timecourse data
+pshared_df = pd.read_csv(base_dir / 'data' / 'llm_results' / 'pshared_timecourse.csv')
 
-# K values to sweep (same as used for unified fitting)
-# Note: We exclude k=0 because it produces spurious gradients from self-response
-# correlations within domains, not from factor structure
-k_values = K_VALUES  # Start from k=1
+# Focus on high/low match (exclude random)
+pshared_hl = pshared_df[pshared_df['match_type'].isin(['high', 'low'])].copy()
 
-# Compute metrics for each k with unified parameters
-k_sweep_results = []
-for k in k_values:
-    model = CommonalityModel(k=k, **UNIFIED_PARAMS)
-    preds = fast_evaluate(model, nochat_eval)
+# Compute means by time_bin, match_type, question_category
+timecourse = pshared_hl.groupby(
+    ['time_bin', 'bin_seconds', 'match_type', 'question_category']
+)['predicted_agreement'].mean().reset_index()
 
-    # Filter to inference questions (exclude observed)
-    inf = preds[preds['question_type'] != 'observed']
+# Load human behavioral data for P(shared) comparison
+behavioral = pd.read_csv(base_dir / 'data' / 'responses.csv', low_memory=False)
+chat_data = behavioral[behavioral['experiment'] == 'chat'].copy()
 
-    # Log-likelihood
-    probs = np.clip(inf['pred_prob'].values, 1e-10, 1-1e-10)
-    actual = inf['actual'].values
-    ll = np.sum(actual * np.log(probs) + (1 - actual) * np.log(1 - probs))
+# Compute human P(shared) by match_type and question_type
+human_rates = {}
+for mt in ['high', 'low']:
+    for qt in ['observed', 'same_domain', 'different_domain']:
+        subset = chat_data[(chat_data['match_type'] == mt) & (chat_data['question_type'] == qt)]
+        human_rates[(mt, qt)] = subset['participant_binary_prediction'].mean()
 
-    # Accuracy
-    accuracy = np.mean((probs > 0.5) == actual)
+print("Human P(shared) rates:")
+for k, v in sorted(human_rates.items()):
+    print(f"  {k}: {v:.3f}")
 
-    # Effects by question type and match type
-    same_high = preds[(preds['question_type'] == 'same_domain') & (preds['match_type'] == 'high')]['pred_prob'].mean()
-    same_low = preds[(preds['question_type'] == 'same_domain') & (preds['match_type'] == 'low')]['pred_prob'].mean()
-    diff_high = preds[(preds['question_type'] == 'different_domain') & (preds['match_type'] == 'high')]['pred_prob'].mean()
-    diff_low = preds[(preds['question_type'] == 'different_domain') & (preds['match_type'] == 'low')]['pred_prob'].mean()
+# Colors for question categories
+COLOR_MATCHED = '#2E86AB'      # Dark blue for focal
+COLOR_SAME = '#A23B72'         # Magenta for same domain
+COLOR_DIFF = '#95a5a6'         # Gray for different domain
 
-    same_effect = same_high - same_low
-    diff_effect = diff_high - diff_low
-    gradient = same_effect - diff_effect
+fig, axes = plt.subplots(1, 2, figsize=(9, 4), sharey=True)
 
-    k_sweep_results.append({
-        'k': k,
-        'same_effect': same_effect,
-        'diff_effect': diff_effect,
-        'gradient': gradient,
-        'log_likelihood': ll,
-        'accuracy': accuracy,
-    })
-
-k_sweep = pd.DataFrame(k_sweep_results)
-
-# Compute human targets from no-chat data
-HUMAN_SAME_NC = NOCHAT_HUMAN[('same_domain', 'high')] - NOCHAT_HUMAN[('same_domain', 'low')]
-HUMAN_DIFF_NC = NOCHAT_HUMAN[('different_domain', 'high')] - NOCHAT_HUMAN[('different_domain', 'low')]
-HUMAN_GRADIENT_NC = HUMAN_SAME_NC - HUMAN_DIFF_NC
-
-# Add gradient error relative to human
-k_sweep['gradient_error'] = np.abs(k_sweep['gradient'] - HUMAN_GRADIENT_NC)
-
-print('=== K-Sweep Results (unified params, no-chat) ===\n')
-print(f'Unified parameters: σ_prior={UNIFIED_PARAMS["sigma_prior"]:.2f}, τ={UNIFIED_PARAMS["match_threshold"]:.2f}, ε={UNIFIED_PARAMS["epsilon"]:.2f}\n')
-print(k_sweep[['k', 'same_effect', 'diff_effect', 'gradient', 'gradient_error', 'accuracy']].to_string(index=False, float_format='%.4f'))
-```
-
-```{python}
-#| fig-cap: "Figure S3: Transfer effects as a function of factor dimensionality k"
-#| fig-width: 7
-#| fig-height: 5
-
-# Paper-style formatting
-plt.rcParams.update({
-    'font.size': 14,
-    'axes.labelsize': 16,
-    'xtick.labelsize': 13,
-    'ytick.labelsize': 13,
-    'legend.fontsize': 12,
-})
-
-fig, ax = plt.subplots(figsize=(7, 5))
-k = k_sweep['k'].values
-
-ax.plot(k, k_sweep['same_effect'], 'o-', color='#2166ac', linewidth=2.5,
-        markersize=8, label='Same-domain effect')
-ax.plot(k, k_sweep['diff_effect'], 's-', color='#b2182b', linewidth=2.5,
-        markersize=8, label='Different-domain effect')
-ax.plot(k, k_sweep['gradient'], '^-', color='#4d9221', linewidth=2.5,
-        markersize=8, label='Gradient (same − diff)')
-
-# Human targets as dashed lines (extend only to right edge of data)
-ax.hlines(HUMAN_SAME_NC, 0, max(k), color='#2166ac', linestyle='--', alpha=0.6, linewidth=1.5)
-ax.hlines(HUMAN_DIFF_NC, 0, max(k), color='#b2182b', linestyle='--', alpha=0.6, linewidth=1.5)
-ax.hlines(HUMAN_GRADIENT_NC, 0, max(k), color='#4d9221', linestyle='--', alpha=0.6, linewidth=1.5)
-
-ax.set_xlabel('Number of factors (k)')
-ax.set_ylabel('Effect magnitude')
-ax.legend(loc='upper right', frameon=False)
-ax.set_xlim(0, max(k) + 1)
-ax.axhline(0, color='gray', linewidth=0.5, alpha=0.5)
-
-# Highlight optimal k
-best_k = k_sweep.loc[k_sweep['gradient_error'].idxmin(), 'k']
-ax.axvline(best_k, color='gray', linestyle=':', alpha=0.6, linewidth=1.5)
-ax.text(best_k + 0.5, 0.01, f'k={int(best_k)}', fontsize=12, color='gray')
-
-plt.tight_layout()
-plt.savefig(base_dir / 'outputs' / 'figures' / 'figure_s3.pdf', dpi=300, bbox_inches='tight')
-plt.show()
-
-# Summary statistics
-print(f'\n=== K-Sweep Summary ===')
-print(f'Human gradient: {HUMAN_GRADIENT_NC:.4f}')
-print(f'Optimal k: {int(best_k)}')
-for k_val in [1, 5, 35]:
-    row = k_sweep[k_sweep['k'] == k_val].iloc[0]
-    pct = row['gradient'] / HUMAN_GRADIENT_NC * 100
-    print(f"  k={k_val}: Gradient = +{row['gradient']:.3f} ({pct:.0f}% of human)")
-```
-
-## 7. Factor Structure (Supplementary)
-
-```{python}
-#| fig-cap: "Figure S2: Factor structure of the 35 survey questions"
-#| fig-width: 12
-#| fig-height: 5
-
-import matplotlib.pyplot as plt
-import numpy as np
-
-# Load full loadings to compute eigenvalues for scree plot
-loadings_full = load_factor_loadings(k=35)
-eigenvalues = np.sum(loadings_full ** 2, axis=0)  # Variance per factor
-
-# Load k=5 for heatmap
-loadings_k5 = load_factor_loadings(k=5)
-loadings_k5[:, 2] *= -1  # Flip factor 3 sign for interpretability
-var_explained_k5 = np.sum(eigenvalues[:5]) / np.sum(eigenvalues) * 100
-
-# Reorder domains for interpretability: group worldview/values domains together
-# Original order: Arbitrary(0-5), Background(5-10), Identity(10-15), Morality(15-20), Politics(20-25), Preferences(25-30), Religion(30-35)
-# New order: Religion first, then Preferences (heavy F2), then other worldview domains
-domain_order = ['Religion', 'Preferences', 'Politics', 'Morality', 'Identity', 'Background', 'Arbitrary']
-original_ranges = {
-    'Arbitrary': (0, 5), 'Background': (5, 10), 'Identity': (10, 15),
-    'Morality': (15, 20), 'Politics': (20, 25), 'Preferences': (25, 30), 'Religion': (30, 35)
+category_styles = {
+    'matched': {'color': COLOR_MATCHED, 'linewidth': 2.5, 'marker': 'o', 'markersize': 5, 'label': 'Focal (discussed)'},
+    'same_domain': {'color': COLOR_SAME, 'linewidth': 2, 'marker': 's', 'markersize': 4, 'label': 'Same domain'},
+    'different_domain': {'color': COLOR_DIFF, 'linewidth': 1.5, 'marker': '^', 'markersize': 4, 'label': 'Different domain'},
 }
 
-# Build reordering index: within each domain, sort by heaviest factor first, then by loading magnitude
-reorder_idx = []
-for domain in domain_order:
-    start, end = original_ranges[domain]
-    domain_qs = list(range(start, end))
-    if domain == 'Religion':
-        # Special case: sort by F3 loading (most negative/darkest blue first)
-        domain_qs.sort(key=lambda q: loadings_k5[q, 2])
-    elif domain == 'Politics':
-        # Special case: sort by F5 loading (most positive/darkest red first)
-        domain_qs.sort(key=lambda q: -loadings_k5[q, 4])
-    else:
-        # Sort by: (1) which factor has max loading, (2) magnitude of that loading (descending)
-        domain_qs.sort(key=lambda q: (np.argmax(np.abs(loadings_k5[q])), -np.max(np.abs(loadings_k5[q]))))
-    reorder_idx.extend(domain_qs)
+# Map question categories to human data keys
+cat_to_human = {
+    'matched': 'observed',
+    'same_domain': 'same_domain',
+    'different_domain': 'different_domain'
+}
 
-loadings_reordered = loadings_k5[reorder_idx]
+for ax, (mt, title) in zip(axes, [('high', 'Shared Stance'), ('low', 'Opposing Stance')]):
+    # Plot LLM predictions (solid lines)
+    for cat in ['matched', 'same_domain', 'different_domain']:
+        subset = timecourse[(timecourse['match_type'] == mt) &
+                           (timecourse['question_category'] == cat)]
+        style = category_styles[cat]
+        ax.plot(subset['bin_seconds'], subset['predicted_agreement'],
+                **style)
 
-# Parallel analysis: eigenvalues from random data
-n_iter = 100
-n_obs = 500  # Approximate sample size
-n_vars = 35
-random_eigenvalues = np.zeros((n_iter, n_vars))
-for i in range(n_iter):
-    random_data = np.random.normal(0, 1, (n_obs, n_vars))
-    cov = np.corrcoef(random_data.T)
-    random_eigenvalues[i] = np.sort(np.linalg.eigvalsh(cov))[::-1]
-parallel_eigenvalues = np.mean(random_eigenvalues, axis=0)
+    # Plot human P(shared) as dashed horizontal lines
+    for cat in ['matched', 'same_domain', 'different_domain']:
+        human_key = cat_to_human[cat]
+        human_val = human_rates[(mt, human_key)]
+        ax.axhline(human_val, color=category_styles[cat]['color'],
+                   linestyle='--', linewidth=1.5, alpha=0.7)
 
-# Set up figure with larger fonts
-plt.rcParams.update({'font.size': 14})
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    ax.set_xlabel('Conversation time (s)')
+    ax.set_title(title, fontweight='bold', fontsize=12)
+    ax.set_ylim(0.1, 1.0)
+    ax.set_xlim(-5, 195)
 
-# --- Panel A: Scree plot with parallel analysis ---
-ax1.plot(range(1, 36), eigenvalues, 'o-', color='#2c3e50', linewidth=2, markersize=7, label='Observed')
-ax1.plot(range(1, 36), parallel_eigenvalues, 's--', color='#95a5a6', linewidth=1.5, markersize=5, label='Parallel analysis')
-ax1.axvline(5, color='#e74c3c', linestyle=':', linewidth=1.5, alpha=0.7)
-ax1.fill_between(range(1, 6), 0, eigenvalues[:5], alpha=0.2, color='#3498db')
-ax1.set_xlabel('Factor', fontsize=16)
-ax1.set_ylabel('Eigenvalue', fontsize=16)
-ax1.text(-0.1, 1.05, 'A', transform=ax1.transAxes, fontsize=20, fontweight='bold', va='bottom')
-ax1.set_xlim(0, 36)
-ax1.set_ylim(0, None)
-ax1.tick_params(labelsize=13)
-ax1.legend(loc='upper right', fontsize=12, frameon=False)
-ax1.text(6, eigenvalues[4] + 0.5, f'k=5\n({var_explained_k5:.0f}%)', fontsize=13, va='bottom')
+# Single legend in panel B
+axes[1].legend(frameon=False, loc='upper right', fontsize=9)
 
-# --- Panel B: Factor loadings heatmap (reordered) ---
-# Clip color scale to make weaker loadings more visible
-im = ax2.imshow(loadings_reordered.T, aspect='auto', cmap='RdBu_r', vmin=-0.6, vmax=0.6)
-
-ax2.set_xlabel('Question', fontsize=16)
-ax2.set_ylabel('Factor', fontsize=16)
-ax2.text(-0.1, 1.05, 'B', transform=ax2.transAxes, fontsize=20, fontweight='bold', va='bottom')
-
-ax2.set_xticks(np.arange(0, 35, 5))
-ax2.set_xticklabels(np.arange(1, 36, 5), fontsize=13)
-ax2.set_yticks(np.arange(5))
-ax2.set_yticklabels([f'F{i+1}' for i in range(5)], fontsize=13)
-
-cbar = plt.colorbar(im, ax=ax2, shrink=0.8)
-cbar.set_label('Loading', fontsize=14)
-cbar.ax.tick_params(labelsize=12)
-
-# Domain boundaries and labels (reordered)
-domain_boundaries = [0, 5, 10, 15, 20, 25, 30, 35]
-for boundary in domain_boundaries[1:-1]:
-    ax2.axvline(boundary - 0.5, color='black', linewidth=1)
-
-for i, name in enumerate(domain_order):
-    mid = (domain_boundaries[i] + domain_boundaries[i+1]) / 2 - 0.5
-    ax2.text(mid, -0.8, name, ha='center', va='bottom', fontsize=10, fontweight='bold', rotation=45)
+axes[0].set_ylabel('P(shared)', fontweight='bold')
+axes[0].text(-0.12, 1.05, 'A', transform=axes[0].transAxes, fontsize=16, fontweight='bold')
+axes[1].text(-0.08, 1.05, 'B', transform=axes[1].transAxes, fontsize=16, fontweight='bold')
 
 plt.tight_layout()
-plt.savefig(base_dir / 'outputs' / 'figures' / 'figure_s2.pdf', dpi=300, bbox_inches='tight')
+plt.savefig(base_dir / 'outputs' / 'figures' / 'figure5.pdf', dpi=300, bbox_inches='tight')
 plt.show()
 
-print(f'\nFigure S2 saved. Variance explained by k=5 factors: {var_explained_k5:.1f}%')
+# Print key statistics
+print('\n=== LLM P(shared) Timecourse Statistics ===\n')
+
+# Changes from t=0 to t=180s
+t0 = pshared_hl[pshared_hl['time_bin'] == 0]
+t12 = pshared_hl[pshared_hl['time_bin'] == 12]
+
+for mt in ['high', 'low']:
+    for cat in ['matched', 'same_domain']:
+        v0 = t0[(t0['match_type'] == mt) & (t0['question_category'] == cat)]['predicted_agreement'].mean()
+        v12 = t12[(t12['match_type'] == mt) & (t12['question_category'] == cat)]['predicted_agreement'].mean()
+        human_val = human_rates[(mt, cat_to_human[cat])]
+        print(f'{mt} {cat}: LLM {v0:.3f} → {v12:.3f} (Δ = {v12-v0:+.3f}), Human = {human_val:.3f}')
 ```
 
-## 8. Summary Statistics
+### Statistical Analysis: Mixed-Effects Model
+
+```{python}
+# Prepare data for mixed-effects analysis
+# We test whether same-domain P(shared) changes differently over time for high vs low match
+
+import subprocess
+import tempfile
+import os
+
+# Export data for R analysis
+analysis_df = pshared_hl[pshared_hl['question_category'].isin(['same_domain', 'different_domain'])].copy()
+analysis_df['match_type_numeric'] = (analysis_df['match_type'] == 'high').astype(int) * 2 - 1  # -1 for low, +1 for high
+analysis_df['is_same_domain'] = (analysis_df['question_category'] == 'same_domain').astype(int)
+analysis_df['time_centered'] = analysis_df['time_bin'] - 6  # Center at midpoint
+
+# Save to temp file for R
+with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+    analysis_df.to_csv(f, index=False)
+    r_data_path = f.name
+
+# Run R mixed-effects analysis
+r_script = '''
+library(lme4)
+library(lmerTest)
+
+df <- read.csv("{data_path}")
+
+# Model: P(shared) ~ time * match_type * question_category + (1|group_id) + (1|question)
+# Using time_bin as continuous predictor
+
+m <- lmer(predicted_agreement ~ time_bin * match_type_numeric * is_same_domain +
+          (1|group_id) + (1|question), data=df)
+
+cat("\\n=== Mixed-Effects Model: LLM P(shared) ===\\n\\n")
+print(summary(m))
+
+# Key contrasts
+cat("\\n=== Key Effects ===\\n")
+coefs <- fixef(m)
+cat(sprintf("Time main effect: %.4f\\n", coefs["time_bin"]))
+cat(sprintf("Match type main effect: %.4f\\n", coefs["match_type_numeric"]))
+cat(sprintf("Same domain main effect: %.4f\\n", coefs["is_same_domain"]))
+cat(sprintf("Time × Match type: %.4f\\n", coefs["time_bin:match_type_numeric"]))
+cat(sprintf("Time × Same domain: %.4f\\n", coefs["time_bin:is_same_domain"]))
+cat(sprintf("Match type × Same domain: %.4f\\n", coefs["match_type_numeric:is_same_domain"]))
+cat(sprintf("Time × Match type × Same domain: %.4f\\n", coefs["time_bin:match_type_numeric:is_same_domain"]))
+'''.format(data_path=r_data_path)
+
+# Write and execute R script
+with tempfile.NamedTemporaryFile(mode='w', suffix='.R', delete=False) as f:
+    f.write(r_script)
+    r_script_path = f.name
+
+try:
+    result = subprocess.run(['Rscript', r_script_path], capture_output=True, text=True, timeout=60)
+    print(result.stdout)
+    if result.stderr:
+        print("R warnings/messages:", result.stderr[:500])
+except Exception as e:
+    print(f"R analysis failed: {e}")
+    print("Running Python approximation instead...")
+
+    # Simple OLS approximation
+    from scipy import stats
+
+    # Test time × match_type interaction for same_domain
+    same_domain = analysis_df[analysis_df['is_same_domain'] == 1]
+    high_slope = stats.linregress(
+        same_domain[same_domain['match_type'] == 'high']['time_bin'],
+        same_domain[same_domain['match_type'] == 'high']['predicted_agreement']
+    ).slope
+    low_slope = stats.linregress(
+        same_domain[same_domain['match_type'] == 'low']['time_bin'],
+        same_domain[same_domain['match_type'] == 'low']['predicted_agreement']
+    ).slope
+
+    print(f"\n=== Python Approximation (OLS) ===")
+    print(f"Same-domain slope (high match): {high_slope:.4f} per time bin")
+    print(f"Same-domain slope (low match): {low_slope:.4f} per time bin")
+    print(f"Difference: {high_slope - low_slope:.4f}")
+
+finally:
+    os.unlink(r_script_path)
+```
+
+## 6. Summary Statistics
 
 ```{python}
 print('=== Key Results Summary (no-chat condition) ===\n')

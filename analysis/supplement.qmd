@@ -202,131 +202,6 @@ summary(model)
 confint(model, method = "Wald")
 ```
 
-## Prior Calibration Analysis {#sec-prior}
-
-A key assumption of the Bayesian factor model is that people have access to population-level information about how beliefs are distributed. To assess whether participants have metacognitive access to population agreement rates, we recruited an independent sample of participants ($N = 150$) to rate each focal topic on several dimensions. Prior to making ratings, all participants completed the same pre-interaction belief survey used in the main study.
-
-A subset of participants ($n = 17$) were asked: "What percentage of other people do you expect share your opinions about each of these questions?" for every focal topic, responding on a slider from 0--100. We compared these expected agreement rates with actual agreement rates computed from the full sample's pre-interaction survey responses.
-
-A linear mixed-effects model predicted actual agreement percentage from expected agreement percentage, with random intercepts for participant, focal topic, and domain. Participants' expectations were significantly correlated with actual population agreement (@fig-prior-calibration), suggesting that people can intuit the degree to which their opinions are commonly held or idiosyncratic. This metacognitive access to population statistics supports the plausibility of population-based priors in our Bayesian model.
-
-```{python}
-#| label: fig-prior-calibration
-#| fig-cap: "Prior calibration analysis. Participants' expected agreement rates correlated with actual population agreement rates, suggesting metacognitive access to population-level belief distributions."
-#| fig-width: 5
-#| fig-height: 4
-
-# Re-import after R chunks (session state lost)
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from scipy.stats import linregress, pearsonr
-from pathlib import Path
-base_dir = Path('/Users/rxdh/Repos/shared-reality')
-data_dir = base_dir / 'data'
-figures_dir = base_dir / 'outputs' / 'figures'
-
-# Load independent sample with expected agreement ratings
-prior_df = pd.read_csv(data_dir / 'prior_calibration.csv')
-
-# Filter to valid participants (consented, completed, real)
-prior_df = prior_df[
-    (prior_df['consent'] == 'Accept consent') &
-    (prior_df['Progress'] == 100) &
-    (prior_df['DistributionChannel'] == 'anonymous')
-].copy()
-n_full = len(prior_df)
-print(f'Full independent sample: N = {n_full}')
-
-# Get same and survey columns - they're ordered the same way positionally
-same_cols = sorted([c for c in prior_df.columns if '_same_' in c])
-survey_cols = sorted([c for c in prior_df.columns if '_survey_' in c])
-print(f'Same columns: {len(same_cols)}, Survey columns: {len(survey_cols)}')
-
-# Filter to participants who completed ALL same judgments (no missing values)
-same_data = prior_df[same_cols]
-has_all_same = same_data.notna().all(axis=1)
-prior_sample = prior_df[has_all_same].copy()
-n_raters = len(prior_sample)
-print(f'Participants with complete same ratings: n = {n_raters}')
-
-# Compute ground truth: % of full sample who gave each response to each question
-# Build a lookup table: question -> response -> proportion
-ground_truth = {}
-for survey_col in survey_cols:
-    responses = prior_df[survey_col].dropna()
-    value_counts = responses.value_counts(normalize=True)
-    ground_truth[survey_col] = value_counts.to_dict()
-
-# For each participant-question, get guess and ground truth
-# same_cols and survey_cols are ordered the same way by domain
-results = []
-for idx, row in prior_sample.iterrows():
-    pid = row.get('prolificID', idx)
-    for i, same_col in enumerate(same_cols):
-        survey_col = survey_cols[i]  # Positional correspondence
-
-        guess = row[same_col] / 100.0  # Convert 0-100 to 0-1
-        own_response = row[survey_col]
-
-        if pd.isna(own_response):
-            continue
-
-        # Get ground truth: what % of sample gave this response?
-        actual = ground_truth[survey_col].get(own_response, 0)
-
-        # Extract domain from column name
-        domain = same_col.split('_')[0]
-
-        results.append({
-            'pid': pid,
-            'guess': guess,
-            'actual': actual,
-            'domain': domain,
-            'question': same_col,
-        })
-
-calibration_df = pd.DataFrame(results)
-print(f'Valid question-level observations: {len(calibration_df)}')
-print(f'Unique participants: {calibration_df["pid"].nunique()}')
-print(f'Unique questions: {calibration_df["question"].nunique()}')
-print(f'Unique domains: {calibration_df["domain"].nunique()}')
-
-# Save for R mixed model
-calibration_df.to_csv(data_dir / 'prior_calibration_long.csv', index=False)
-
-# Quick correlation for figure annotation
-r, _ = pearsonr(calibration_df['guess'], calibration_df['actual'])
-print(f'Correlation r = {r:.2f}')
-
-fig, ax = plt.subplots(figsize=(5, 4))
-sns.regplot(x='guess', y='actual', data=calibration_df, ax=ax,
-            scatter_kws={'alpha': 0.3}, line_kws={'color': '#3a0ca3'})
-ax.set_xlabel('Expected Agreement (proportion)', fontweight='bold')
-ax.set_ylabel('Actual Population Agreement (proportion)', fontweight='bold')
-ax.set_xlim([0, 1])
-ax.set_ylim([0, 1])
-ax.plot([0, 1], [0, 1], 'k--', alpha=0.3, label='Perfect calibration')
-plt.tight_layout()
-plt.savefig(figures_dir / 'prior_calibration.pdf', dpi=300, bbox_inches='tight')
-plt.show()
-```
-
-```{r}
-#| label: prior-calibration-model
-#| echo: true
-
-# Load calibration data
-cal_df <- read.csv(file.path(dirname(getwd()), 'data', 'prior_calibration_long.csv'))
-
-# Mixed-effects model matching original: GroundTruth ~ Guess + (1|PartID) + (1|DomainID) + (1|QuestionName)
-prior_model <- lmer(actual ~ guess + (1|pid) + (1|domain) + (1|question),
-                    data = cal_df)
-summary(prior_model)
-confint(prior_model, method = "Wald")
-```
-
 ## Factor Structure of Belief Space {#sec-factor}
 
 We computed factor loadings via eigendecomposition of the 35-question belief correlation matrix. @fig-factor-structure panel A shows the scree plot comparing observed eigenvalues against the 95th percentile from parallel analysis (eigenvalues computed from random data with the same dimensions). The first five components exceeded the parallel analysis threshold, suggesting $k = 5$ factors. These five factors explained 36% of total variance.
@@ -822,26 +697,44 @@ base_dir = Path.cwd().resolve()
 while base_dir.name and not (base_dir / 'data').exists():
     base_dir = base_dir.parent
 
-# Load pre-computed LLM predictions
-llm_accuracy = pd.read_csv(base_dir / 'data' / 'llm_results' / 'nochat_accuracy.csv')
+llm_dir = base_dir / 'data' / 'llm_results'
 
-# Compute accuracy by category
-accuracy_by_cat = {}
+# Load single-observation (nochat) predictions
+nochat_acc = pd.read_csv(llm_dir / 'nochat_accuracy.csv')
+nochat_by_cat = {}
 for cat in ['matched', 'same_domain', 'different_domain']:
-    subset = llm_accuracy[llm_accuracy['category'] == cat]
+    subset = nochat_acc[nochat_acc['category'] == cat]
     if len(subset) > 0:
-        accuracy_by_cat[cat] = subset['prob_correct'].mean() * 100
+        nochat_by_cat[cat] = subset['prob_correct'].mean() * 100
+
+# Load full conversation (chat timecourse) predictions - use final time bin
+chat_acc = pd.read_csv(llm_dir / 'chat_timecourse_accuracy.csv')
+final_bin = chat_acc['time_bin'].max()
+chat_final = chat_acc[chat_acc['time_bin'] == final_bin]
+chat_by_cat = {}
+for cat in ['matched', 'same_domain', 'different_domain']:
+    subset = chat_final[chat_final['question_category'] == cat]
+    if len(subset) > 0:
+        chat_by_cat[cat] = subset['prob_correct'].mean() * 100
+
+# Prior baseline: ~20% uniform (1/5 chance)
+prior_acc = 20.0  # Approximate uniform baseline
 
 # Create summary table
 summary_data = {
     'Condition': ['Prior (no information)', 'Single observation', 'Full conversation'],
-    'Focal Topic': ['18.1%', f"{accuracy_by_cat.get('matched', 0):.1f}%", '72.6%'],
-    'Same Domain': ['18.3%', f"{accuracy_by_cat.get('same_domain', 0):.1f}%", '38.3%'],
-    'Different Domain': ['18.0%', f"{accuracy_by_cat.get('different_domain', 0):.1f}%", '31.8%']
+    'Focal Topic': [f'{prior_acc:.1f}%', f"{nochat_by_cat.get('matched', 0):.1f}%", f"{chat_by_cat.get('matched', 0):.1f}%"],
+    'Same Domain': [f'{prior_acc:.1f}%', f"{nochat_by_cat.get('same_domain', 0):.1f}%", f"{chat_by_cat.get('same_domain', 0):.1f}%"],
+    'Different Domain': [f'{prior_acc:.1f}%', f"{nochat_by_cat.get('different_domain', 0):.1f}%", f"{chat_by_cat.get('different_domain', 0):.1f}%"]
 }
 
 llm_table = pd.DataFrame(summary_data)
 print(llm_table.to_markdown(index=False))
+
+# Print computed values for verification
+print(f"\nComputed from data files:")
+print(f"  Single obs - Focal: {nochat_by_cat.get('matched', 0):.1f}%, Same: {nochat_by_cat.get('same_domain', 0):.1f}%, Diff: {nochat_by_cat.get('different_domain', 0):.1f}%")
+print(f"  Full conv  - Focal: {chat_by_cat.get('matched', 0):.1f}%, Same: {chat_by_cat.get('same_domain', 0):.1f}%, Diff: {chat_by_cat.get('different_domain', 0):.1f}%")
 ```
 
 The prior baseline showed no gradient (approximately 18% across all question types), confirming that population-level knowledge alone cannot explain structured predictions. With a single observation, the LLM showed modest improvement concentrated on the focal topic. With full conversational content, accuracy improved substantially across all question types, with the characteristic gradient (focal > same domain > different domain) that mirrors human commonality inferences.
