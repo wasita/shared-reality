@@ -63,7 +63,6 @@ python -m models.llm.pipeline download chat
 
 Results are saved to `data/llm_results/`:
 - `pshared_timecourse.csv` - Agreement predictions by group/time/question
-- `chat_timecourse_accuracy.csv` - Full distribution predictions
 
 ## Prompt Templates
 

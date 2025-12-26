@@ -511,6 +511,179 @@ for _, row in lambda_df.iterrows():
     print(f"  lambda={row['lambda']:.2f} ({label}): Gradient = +{row['gradient']:.3f} ({pct:.0f}% of human)")
 ```
 
+## Diagnostic Test: Self-Structure vs. Population Structure {#sec-self-structure}
+
+A potential concern is that if individual belief structures mirror population structure (due to shared cultural learning), then egocentric projection could produce gradients indistinguishable from Bayesian inference. To address this, we identified "diagnostic" participants whose own belief structure deviated from the population pattern and tested whether their generalization behavior followed their own structure or the population structure.
+
+For each participant, we computed a "self-structure gradient"—the difference between within-domain and cross-domain response similarity in their own pre-chat responses. Participants in the bottom quartile (N = 126) showed weak or reversed domain clustering (mean self-structure gradient = −0.024), meaning their own responses did not cluster by domain the way the population does.
+
+```{python}
+#| label: fig-self-structure
+#| fig-cap: "Diagnostic test of self-structure vs. population structure. (A) Distribution of self-structure gradients across participants. Shaded region indicates the bottom quartile (anomalous structure). (B) Behavioral gradients for participants with normal vs. anomalous self-structure. Despite having different self-structure, both groups show similar positive behavioral gradients, supporting population-based inference. Error bars are 95% bootstrap CIs."
+#| fig-width: 9
+#| fig-height: 4
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+base_dir = Path('/Users/rxdh/Repos/shared-reality')
+data_dir = base_dir / 'data'
+figures_dir = base_dir / 'outputs' / 'figures'
+
+# Colors
+COLOR_POP = '#648FFF'
+COLOR_SELF = '#DC267F'
+
+# Domain ranges
+DOMAIN_RANGES = {
+    'arbitrary': (0, 5), 'background': (5, 10), 'identity': (10, 15),
+    'morality': (15, 20), 'politics': (20, 25), 'preferences': (25, 30),
+    'religion': (30, 35),
+}
+
+# Load responses
+responses_df = pd.read_csv(data_dir / 'responses.csv', low_memory=False)
+response_matrix = responses_df.pivot_table(
+    index='pid', columns='question', values='preChatResponse', aggfunc='first'
+)
+
+def compute_self_structure_gradient(responses):
+    """Compute within - cross domain similarity from individual responses."""
+    within_sims, cross_sims = [], []
+    for d, (start, end) in DOMAIN_RANGES.items():
+        for i in range(start, end):
+            for j in range(i+1, end):
+                within_sims.append(1 - abs(responses[i] - responses[j]) / 4.0)
+        for d2, (s2, e2) in DOMAIN_RANGES.items():
+            if d != d2:
+                for i in range(start, end):
+                    for j in range(s2, e2):
+                        cross_sims.append(1 - abs(responses[i] - responses[j]) / 4.0)
+    return np.mean(within_sims) - np.mean(cross_sims)
+
+# Compute self-structure for each participant
+structure_gradients = {}
+for pid in response_matrix.index:
+    responses = response_matrix.loc[pid].values
+    structure_gradients[pid] = compute_self_structure_gradient(responses)
+
+all_grads = list(structure_gradients.values())
+q25 = np.percentile(all_grads, 25)
+
+# Load behavioral data
+nochat_data = responses_df[responses_df['experiment'] == 'no-chat'].copy()
+nochat_data['self_structure_gradient'] = nochat_data['pid'].map(structure_gradients)
+nochat_data['is_anomaly'] = nochat_data['self_structure_gradient'] < q25
+
+n_normal = nochat_data[~nochat_data['is_anomaly']]['pid'].nunique()
+n_anomaly = nochat_data[nochat_data['is_anomaly']]['pid'].nunique()
+
+# Compute behavioral gradients
+def compute_group_gradient(df, col):
+    rates = {}
+    for qt in ['same_domain', 'different_domain']:
+        for mt in ['high', 'low']:
+            cell = df[(df['question_type'] == qt) & (df['match_type'] == mt)]
+            rates[(qt, mt)] = cell[col].mean() if len(cell) > 0 else np.nan
+    if any(pd.isna(v) for v in rates.values()):
+        return np.nan
+    return (rates[('same_domain', 'high')] - rates[('same_domain', 'low')]) - \
+           (rates[('different_domain', 'high')] - rates[('different_domain', 'low')])
+
+normal_data = nochat_data[~nochat_data['is_anomaly']]
+anomaly_data = nochat_data[nochat_data['is_anomaly']]
+
+normal_gradient = compute_group_gradient(normal_data, 'participant_binary_prediction')
+anomaly_gradient = compute_group_gradient(anomaly_data, 'participant_binary_prediction')
+
+# Bootstrap CIs
+def bootstrap_gradient(df, col, n_boot=1000, seed=42):
+    np.random.seed(seed)
+    grads = []
+    pids = df['pid'].unique()
+    for _ in range(n_boot):
+        boot_pids = np.random.choice(pids, size=len(pids), replace=True)
+        boot_df = df[df['pid'].isin(boot_pids)]
+        g = compute_group_gradient(boot_df, col)
+        if not np.isnan(g):
+            grads.append(g)
+    return np.array(grads)
+
+normal_boots = bootstrap_gradient(normal_data, 'participant_binary_prediction')
+anomaly_boots = bootstrap_gradient(anomaly_data, 'participant_binary_prediction')
+
+# Create figure
+plt.rcParams['font.family'] = 'Helvetica Neue'
+plt.rcParams['axes.spines.top'] = False
+plt.rcParams['axes.spines.right'] = False
+
+fig, axes = plt.subplots(1, 2, figsize=(9, 4))
+
+# Panel A: Distribution
+ax = axes[0]
+ax.hist(all_grads, bins=25, color=COLOR_POP, alpha=0.8, edgecolor='white', linewidth=0.5)
+ax.axvline(q25, color=COLOR_SELF, linestyle='--', linewidth=2,
+           label=f'Bottom quartile\n(N={n_anomaly})')
+ax.axvline(0, color='gray', linestyle=':', linewidth=1, alpha=0.7)
+ax.axvspan(min(all_grads) - 0.01, q25, alpha=0.15, color=COLOR_SELF)
+ax.set_xlabel('Self-structure gradient\n(within − cross domain similarity)', fontsize=11)
+ax.set_ylabel('Number of participants', fontsize=11)
+ax.set_title('A', fontweight='bold', loc='left', fontsize=14)
+ax.legend(frameon=False, fontsize=9, loc='upper right')
+
+# Panel B: Behavioral gradients
+ax = axes[1]
+width = 0.6
+normal_err = [[normal_gradient - np.percentile(normal_boots, 2.5)],
+              [np.percentile(normal_boots, 97.5) - normal_gradient]]
+anomaly_err = [[anomaly_gradient - np.percentile(anomaly_boots, 2.5)],
+               [np.percentile(anomaly_boots, 97.5) - anomaly_gradient]]
+
+ax.bar([0], [normal_gradient], width=width, color=COLOR_POP,
+       yerr=normal_err, capsize=4, error_kw={'linewidth': 1.5})
+ax.bar([1], [anomaly_gradient], width=width, color=COLOR_SELF,
+       yerr=anomaly_err, capsize=4, error_kw={'linewidth': 1.5})
+ax.axhline(0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
+
+# n.s. bracket
+bracket_y = max(normal_gradient + normal_err[1][0],
+                anomaly_gradient + anomaly_err[1][0]) + 0.015
+ax.plot([0, 0, 1, 1], [normal_gradient + normal_err[1][0] + 0.005, bracket_y,
+                       bracket_y, anomaly_gradient + anomaly_err[1][0] + 0.005],
+        'k-', lw=1, solid_capstyle='butt')
+ax.text(0.5, bracket_y + 0.008, 'n.s.', ha='center', fontsize=10, fontstyle='italic')
+
+ax.set_xticks([0, 1])
+ax.set_xticklabels(['Normal\nstructure', 'Anomalous\nstructure'], fontsize=10)
+ax.set_ylabel('Behavioral gradient\n(same − different domain)', fontsize=11)
+ax.set_title('B', fontweight='bold', loc='left', fontsize=14)
+ax.set_ylim(-0.02, bracket_y + 0.04)
+
+plt.tight_layout()
+plt.savefig(figures_dir / 'figure_self_structure.pdf', dpi=300, bbox_inches='tight')
+plt.show()
+
+# Print statistics
+normal_self = normal_data.groupby('pid')['self_structure_gradient'].first().mean()
+anomaly_self = anomaly_data.groupby('pid')['self_structure_gradient'].first().mean()
+
+# Bootstrap p-value
+diff_boots = normal_boots[:min(len(normal_boots), len(anomaly_boots))] - \
+             anomaly_boots[:min(len(normal_boots), len(anomaly_boots))]
+p_diff = 2 * min(np.mean(diff_boots < 0), np.mean(diff_boots > 0))
+
+print(f"Normal structure (N={n_normal}): self-structure = {normal_self:+.3f}, behavioral gradient = {normal_gradient:+.3f}")
+print(f"Anomalous structure (N={n_anomaly}): self-structure = {anomaly_self:+.3f}, behavioral gradient = {anomaly_gradient:+.3f}")
+print(f"Difference in behavioral gradients: {normal_gradient - anomaly_gradient:+.3f}, p = {p_diff:.3f}")
+print(f"Anomalous 95% CI: [{np.percentile(anomaly_boots, 2.5):+.3f}, {np.percentile(anomaly_boots, 97.5):+.3f}]")
+```
+
+The critical finding is that participants with anomalous self-structure (negative self-structure gradient, meaning their responses do not cluster by domain) nonetheless showed robust positive behavioral gradients (+0.123, 95% CI [0.050, 0.193]) indistinguishable from participants with typical structure (p = 0.97). If people projected from their own beliefs, these participants should show weak or reversed generalization gradients matching their own structure. Instead, all participants showed domain-structured generalization consistent with population-level knowledge.
+
+Furthermore, individual self-structure gradient did not correlate with behavioral gradient (r = 0.023, p = 0.605), nor with same-domain P(shared) judgments (r = −0.011, p = 0.802). These null correlations confirm that generalization behavior does not track the idiosyncratic structure of one's own beliefs.
+
 ## Scrambled Loadings Control {#sec-scrambled}
 
 To verify that model performance depends on veridical belief structure, we compared the actual factor loadings against scrambled loadings (rows of $\Lambda$ randomly permuted). Scrambling destroys the question-to-factor mapping while preserving marginal distributions. Across 100 random permutations, the gradient collapsed to near-zero (@fig-scrambled). This confirms that the Bayesian model captures real structure in belief covariance---the specific question-to-factor mapping is meaningful, not arbitrary.
@@ -756,13 +929,13 @@ Return JSON with this structure:
 
 For the prior baseline (no conversation), we used a simplified prompt asking the model to predict responses for a randomly selected person based only on "general population tendencies" and "the nature of the question," with no conversation content.
 
-## LLM Performance Details {#sec-llm-performance}
+## LLM Timecourse Results {#sec-llm-pshared}
 
-@tbl-llm-accuracy presents detailed LLM accuracy broken down by condition and question type.
+@tbl-llm-pshared presents LLM-predicted P(shared) at conversation end compared to human judgments.
 
 ```{python}
-#| label: tbl-llm-accuracy
-#| tbl-cap: "LLM prediction accuracy by condition and question type. Prior = population baseline with no individual information. Single observation = information-matched to Bayesian model. Full conversation = complete chat transcript."
+#| label: tbl-llm-pshared
+#| tbl-cap: "LLM-predicted P(shared) at conversation end (180s) compared to human judgments, by stance condition and question type."
 
 # Re-import after R chunk (knitr breaks Python session)
 import pandas as pd
@@ -772,46 +945,54 @@ while base_dir.name and not (base_dir / 'data').exists():
     base_dir = base_dir.parent
 
 llm_dir = base_dir / 'data' / 'llm_results'
+data_dir = base_dir / 'data'
 
-# Load single-observation (nochat) predictions
-nochat_acc = pd.read_csv(llm_dir / 'nochat_accuracy.csv')
-nochat_by_cat = {}
-for cat in ['matched', 'same_domain', 'different_domain']:
-    subset = nochat_acc[nochat_acc['category'] == cat]
-    if len(subset) > 0:
-        nochat_by_cat[cat] = subset['prob_correct'].mean() * 100
+# Load P(shared) timecourse - use final time bin
+pshared_df = pd.read_csv(llm_dir / 'pshared_timecourse.csv')
+pshared_hl = pshared_df[pshared_df['match_type'].isin(['high', 'low'])]
+final_bin = pshared_hl['time_bin'].max()
+pshared_final = pshared_hl[pshared_hl['time_bin'] == final_bin]
 
-# Load full conversation (chat timecourse) predictions - use final time bin
-chat_acc = pd.read_csv(llm_dir / 'chat_timecourse_accuracy.csv')
-final_bin = chat_acc['time_bin'].max()
-chat_final = chat_acc[chat_acc['time_bin'] == final_bin]
-chat_by_cat = {}
-for cat in ['matched', 'same_domain', 'different_domain']:
-    subset = chat_final[chat_final['question_category'] == cat]
-    if len(subset) > 0:
-        chat_by_cat[cat] = subset['prob_correct'].mean() * 100
+# Compute LLM P(shared) by stance and question category
+llm_pshared = {}
+for mt in ['high', 'low']:
+    for cat in ['matched', 'same_domain', 'different_domain']:
+        subset = pshared_final[(pshared_final['match_type'] == mt) &
+                               (pshared_final['question_category'] == cat)]
+        if len(subset) > 0:
+            llm_pshared[(mt, cat)] = subset['predicted_agreement'].mean()
 
-# Prior baseline: ~20% uniform (1/5 chance)
-prior_acc = 20.0  # Approximate uniform baseline
+# Load human behavioral data for comparison
+responses_df = pd.read_csv(data_dir / 'responses.csv', low_memory=False)
+chat_data = responses_df[responses_df['experiment'] == 'chat']
 
-# Create summary table
-summary_data = {
-    'Condition': ['Prior (no information)', 'Single observation', 'Full conversation'],
-    'Focal Topic': [f'{prior_acc:.1f}%', f"{nochat_by_cat.get('matched', 0):.1f}%", f"{chat_by_cat.get('matched', 0):.1f}%"],
-    'Same Domain': [f'{prior_acc:.1f}%', f"{nochat_by_cat.get('same_domain', 0):.1f}%", f"{chat_by_cat.get('same_domain', 0):.1f}%"],
-    'Different Domain': [f'{prior_acc:.1f}%', f"{nochat_by_cat.get('different_domain', 0):.1f}%", f"{chat_by_cat.get('different_domain', 0):.1f}%"]
-}
+# Compute human P(shared) by stance and question type
+human_pshared = {}
+cat_to_qt = {'matched': 'observed', 'same_domain': 'same_domain', 'different_domain': 'different_domain'}
+for mt in ['high', 'low']:
+    for cat, qt in cat_to_qt.items():
+        subset = chat_data[(chat_data['match_type'] == mt) & (chat_data['question_type'] == qt)]
+        if len(subset) > 0:
+            human_pshared[(mt, cat)] = subset['participant_binary_prediction'].mean()
 
-llm_table = pd.DataFrame(summary_data)
-print(llm_table.to_markdown(index=False))
+# Create table matching LaTeX format
+rows = []
+for mt, stance_label in [('high', 'Shared'), ('low', 'Opposing')]:
+    for cat, cat_label in [('matched', 'Focal (discussed)'), ('same_domain', 'Same domain'), ('different_domain', 'Different domain')]:
+        llm_val = llm_pshared.get((mt, cat), float('nan'))
+        human_val = human_pshared.get((mt, cat), float('nan'))
+        rows.append({
+            'Stance': stance_label,
+            'Question Type': cat_label,
+            'LLM P(shared)': f'{llm_val:.2f}',
+            'Human P(shared)': f'{human_val:.2f}'
+        })
 
-# Print computed values for verification
-print(f"\nComputed from data files:")
-print(f"  Single obs - Focal: {nochat_by_cat.get('matched', 0):.1f}%, Same: {nochat_by_cat.get('same_domain', 0):.1f}%, Diff: {nochat_by_cat.get('different_domain', 0):.1f}%")
-print(f"  Full conv  - Focal: {chat_by_cat.get('matched', 0):.1f}%, Same: {chat_by_cat.get('same_domain', 0):.1f}%, Diff: {chat_by_cat.get('different_domain', 0):.1f}%")
+table_df = pd.DataFrame(rows)
+print(table_df.to_markdown(index=False))
 ```
 
-The prior baseline showed no gradient (approximately 18% across all question types), confirming that population-level knowledge alone cannot explain structured predictions. With a single observation, the LLM showed modest improvement concentrated on the focal topic. With full conversational content, accuracy improved substantially across all question types, with the characteristic gradient (focal > same domain > different domain) that mirrors human commonality inferences.
+For shared stance pairs, LLM predictions closely matched human judgments across all question types, with the generalization gradient clearly visible (focal > same domain > different domain). For opposing stance pairs, the LLM correctly predicted low agreement on the focal question but was more extreme than human judgments; same-domain and different-domain predictions were well-calibrated.
 
 ## Survey Questions by Domain {#sec-stimuli}
 
