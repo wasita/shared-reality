@@ -12,14 +12,13 @@ execute:
   message: false
 ---
 
-This document reproduces the main computational model analyses and Figure 4 from the paper.
+This document reproduces the main computational model analyses (Figures 4-5) from the paper.
 
 1. **Setup** - Load model and data
 2. **Parameter Fitting** - Grid search over (σ_obs, σ_prior, τ, ε)
-3. **Model Comparison** - Nested model evaluation
-4. **Figure 4** - Main model figure
-5. **LLM Analysis** - Pre-computed LLM predictions
-6. **Summary** - Key statistics
+3. **Figure 4** - Bayesian model predictions
+4. **LLM Analysis** - LLM predictions (Figure 5)
+5. **Summary** - Key statistics
 
 See `supplement.qmd` for supplementary analyses (k-sweep, factor structure, scrambled control).
 
@@ -47,102 +46,6 @@ from models.model import (
 )
 
 print(f'Project root: {base_dir}')
-```
-
-```{python}
-# --- Evaluation utilities (transparent, not hidden in module) ---
-
-def run_evaluation(model, data):
-    """Run model on all participants, return predictions DataFrame.
-
-    Uses perceived response (postChatResponse) for chat condition,
-    ground truth (partner_response) for no-chat condition.
-    """
-    results = []
-    for pid in data["pid"].unique():
-        subj = data[data["pid"] == pid]
-        matched = subj[subj["is_matched"] == True]
-        if len(matched) == 0:
-            continue
-
-        obs_q = int(matched["matchedIdx"].iloc[0]) - 1
-
-        # Use perceived response for chat, ground truth for no-chat
-        experiment = subj["experiment"].iloc[0]
-        if experiment == "chat":
-            obs_row = subj[subj["question_type"] == "observed"]
-            if len(obs_row) == 0:
-                continue
-            r_partner = obs_row["postChatResponse"].iloc[0]
-        else:
-            r_partner = matched["partner_response"].iloc[0]
-
-        if pd.isna(r_partner):
-            continue
-
-        r_self = np.zeros(N_QUESTIONS)
-        for _, row in subj.iterrows():
-            r_self[int(row["question"]) - 1] = row["preChatResponse"]
-
-        preds = model.predict(obs_q, float(r_partner), r_self)
-
-        for _, row in subj.iterrows():
-            results.append({
-                "pid": pid,
-                "question": row["question"],
-                "question_domain": row["preChatDomain"],
-                "match_type": matched["match_type"].iloc[0],
-                "question_type": row["question_type"],
-                "pred_prob": preds[int(row["question"]) - 1],
-                "actual": row["participant_binary_prediction"],
-            })
-    return pd.DataFrame(results)
-
-
-def compute_metrics(pred_df, human_rates=None):
-    """Compute evaluation metrics from predictions."""
-    probs = pred_df["pred_prob"].values
-    actual = pred_df["actual"].values
-
-    # Trial-level log-likelihood
-    ll = np.sum(actual * np.log(probs + 1e-10) + (1 - actual) * np.log(1 - probs + 1e-10))
-
-    # Domain-aggregated log-likelihood (equal weight per domain, avoids diff-domain dominance)
-    domain_lls = []
-    for domain in pred_df["question_domain"].str.lower().unique():
-        d = pred_df[pred_df["question_domain"].str.lower() == domain]
-        if len(d) > 0:
-            p, a = d["pred_prob"].values, d["actual"].values
-            domain_lls.append(np.mean(a * np.log(p + 1e-10) + (1 - a) * np.log(1 - p + 1e-10)))
-    domain_agg_ll = np.sum(domain_lls)
-
-    results = {
-        'log_likelihood': ll,
-        'domain_agg_ll': domain_agg_ll,
-        'accuracy': np.mean((probs > 0.5) == actual),
-    }
-
-    # Cell-level rates and effects
-    model_rates = {}
-    for qt in ['observed', 'same_domain', 'different_domain']:
-        for mt in ['high', 'low']:
-            cell = pred_df[(pred_df["question_type"] == qt) & (pred_df["match_type"] == mt)]
-            model_rates[(qt, mt)] = cell["pred_prob"].mean() if len(cell) else 0.5
-        results[f'{qt}_effect'] = model_rates[(qt, 'high')] - model_rates[(qt, 'low')]
-
-    results['model_rates'] = model_rates
-    results['gradient'] = results['same_domain_effect'] - results['different_domain_effect']
-
-    if human_rates:
-        m = [model_rates[k] for k in sorted(human_rates.keys())]
-        h = [human_rates[k] for k in sorted(human_rates.keys())]
-        results['correlation'] = float(np.corrcoef(m, h)[0, 1])
-        # Gradient error (for fitting)
-        human_gradient = (human_rates[('same_domain', 'high')] - human_rates[('same_domain', 'low')]) - \
-                         (human_rates[('different_domain', 'high')] - human_rates[('different_domain', 'low')])
-        results['gradient_error'] = abs(results['gradient'] - human_gradient)
-
-    return results
 ```
 
 ```{python}
@@ -252,56 +155,7 @@ if refit:
 FITTED_PARAMS = K5_PARAMS
 ```
 
-## 3. Model Comparison
-
-Using the same fitted parameters across all models for fair comparison.
-
-```{python}
-# Define nested models with the SAME fitted parameters
-# This isolates the effect of k without confounding from parameter differences
-model_specs = {
-    'k=1 (baseline)': {'k': 1, **FITTED_PARAMS},
-    'k=4 (factor)': {'k': 4, **FITTED_PARAMS},
-    'k=35 (full cov)': {'k': 35, **FITTED_PARAMS},
-}
-```
-
-```{python}
-#| output: false
-# Run evaluation for each model
-results = {}
-predictions = {}
-
-for name, spec in model_specs.items():
-    print(f'Evaluating {name}...')
-    model = CommonalityModel(**spec)
-    pred_df = run_evaluation(model, data)
-    pred_df['model'] = name
-    predictions[name] = pred_df
-    results[name] = compute_metrics(pred_df, human_rates=HUMAN_RATES)
-
-# Combine all predictions
-all_preds = pd.concat(predictions.values(), ignore_index=True)
-```
-
-```{python}
-# Print comparison table
-print('=== Model Comparison ===\n')
-print(f'{"Model":<20} {"Same Effect":>12} {"Diff Effect":>12} {"Gradient":>10}')
-print('-' * 56)
-
-# Human baseline
-human_same = HUMAN_RATES[('same_domain', 'high')] - HUMAN_RATES[('same_domain', 'low')]
-human_diff = HUMAN_RATES[('different_domain', 'high')] - HUMAN_RATES[('different_domain', 'low')]
-print(f'{"Human":<20} {human_same:>+12.3f} {human_diff:>+12.3f} {human_same - human_diff:>10.3f}')
-
-for name, r in results.items():
-    same = r['same_domain_effect']
-    diff = r['different_domain_effect']
-    print(f'{name:<20} {same:>+12.3f} {diff:>+12.3f} {same - diff:>10.3f}')
-```
-
-## 4. Figure 4
+## 3. Figure 4
 
 The Bayesian model receives only a single Likert response, so we evaluate on the **no-chat** condition where human participants also receive only this information. Panel A mirrors Figure 2 format, showing model predictions.
 
@@ -329,9 +183,8 @@ COLOR_SCRAMBLED = '#95a5a6'  # Light gray
 nochat_data = data[data['experiment'] == 'no-chat'].copy()
 nochat_eval = prepare_evaluation_data(nochat_data)
 
-# Run k=5 model with UNIFIED parameters (σ_obs=0 for no-chat)
-PARAMS = {'sigma_obs': 0.0, 'sigma_prior': 1.5, 'match_threshold': 2.0, 'epsilon': 0.1}
-model_k5 = CommonalityModel(k=5, lambda_mix=0.0, **PARAMS)
+# Run k=5 model with fitted parameters (σ_obs=0 for no-chat)
+model_k5 = CommonalityModel(k=5, lambda_mix=0.0, **FITTED_PARAMS)
 nochat_preds = fast_evaluate(model_k5, nochat_eval)
 nochat_preds['domain'] = nochat_preds['question_domain'].str.lower()
 
@@ -471,7 +324,7 @@ human_ci = bootstrap_gradient(nochat_preds, 'actual')
 bayes_ci = bootstrap_gradient(nochat_preds, 'pred_prob')
 
 # Similarity Projection model
-m_proj = CommonalityModel(k=0, lambda_mix=1.0, **PARAMS,
+m_proj = CommonalityModel(k=0, lambda_mix=1.0, **FITTED_PARAMS,
     base_rate=0.2, projection_weight=0.8)
 proj_preds = fast_evaluate(m_proj, nochat_eval)
 proj_preds['pid'] = nochat_preds['pid'].values  # Copy pids for bootstrapping
@@ -485,7 +338,7 @@ shuffled_grads = []
 for seed in range(100):
     np.random.seed(seed)
     perm = np.random.permutation(35)
-    m = CommonalityModel(k=5, lambda_mix=0.0, loadings=real_loadings[perm, :], **PARAMS)
+    m = CommonalityModel(k=5, lambda_mix=0.0, loadings=real_loadings[perm, :], **FITTED_PARAMS)
     preds = fast_evaluate(m, nochat_eval)
     shuffled_grads.append(compute_gradient(preds, 'pred_prob'))
 scrambled_gradient = np.mean(shuffled_grads)
@@ -529,7 +382,7 @@ print(f'Scrambled:           {scrambled_gradient:+.3f}')
 print(f'\nDomain-level correlation: r = {r:.2f}')
 ```
 
-## 5. LLM Analysis
+## 4. LLM Analysis
 
 Paper reports: LLM accuracy improves from 18.1% (prior) to 33.7% (with conversation), with gradient: observed 72.6%, same-domain 38.3%, different-domain 31.8%.
 
@@ -555,70 +408,7 @@ for cat in ['observed', 'same_domain', 'different_domain']:
 print(f'\nPaper reports: observed 72.6%, same-domain 38.3%, different-domain 31.8%')
 ```
 
-### LLM Timecourse (Supplementary)
-
-```{python}
-#| fig-cap: "Supplementary: LLM prediction accuracy over conversation time"
-#| fig-width: 12
-#| fig-height: 5
-
-# Load timecourse accuracy data
-timecourse_df = pd.read_csv(base_dir / 'data' / 'llm_results' / 'chat_timecourse_accuracy.csv')
-
-# Aggregate by time_bin, match_type, question_category
-timecourse_agg = timecourse_df.groupby(
-    ['time_bin', 'bin_seconds', 'match_type', 'question_category']
-)['correct'].mean().reset_index()
-timecourse_agg['accuracy_pct'] = timecourse_agg['correct'] * 100
-
-fig, (ax_high, ax_low) = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
-
-colors = {
-    'matched': '#2E86AB',
-    'same_domain': '#A23B72',
-    'different_domain': '#F18F01'
-}
-
-labels = {
-    'matched': 'Matched (discussed)',
-    'same_domain': 'Same Domain',
-    'different_domain': 'Different Domain'
-}
-
-for ax, match_type, title in [
-    (ax_high, 'high', 'High-Match Pairs'),
-    (ax_low, 'low', 'Low-Match Pairs')
-]:
-    subset_match = timecourse_agg[timecourse_agg['match_type'] == match_type]
-
-    for cat in ['matched', 'same_domain', 'different_domain']:
-        subset = subset_match[subset_match['question_category'] == cat]
-        if len(subset) > 0:
-            ax.plot(subset['bin_seconds'], subset['accuracy_pct'],
-                   marker='o', linewidth=2, markersize=5,
-                   color=colors[cat], label=labels[cat])
-
-    ax.set_xlabel('Conversation Time (seconds)')
-    ax.set_title(title, fontweight='bold')
-    ax.set_xlim(0, 195)
-    ax.set_ylim(15, 50)
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc='upper left', fontsize=9)
-
-ax_high.set_ylabel('LLM Prediction Accuracy (%)')
-
-plt.tight_layout()
-plt.savefig(base_dir / 'outputs' / 'figures' / 'llm_timecourse.pdf', dpi=300, bbox_inches='tight')
-plt.show()
-
-# Summary stats
-print('\nTimecourse summary (final time bin):')
-final_bin = timecourse_agg[timecourse_agg['time_bin'] == timecourse_agg['time_bin'].max()]
-for _, row in final_bin.iterrows():
-    print(f"  {row['match_type']} / {row['question_category']}: {row['accuracy_pct']:.1f}%")
-```
-
-### LLM P(shared) Timecourse (Main Text Figure)
+### LLM P(shared) Timecourse (Figure 5)
 
 This figure shows how the LLM's predicted P(shared) evolves over the course of conversation. The key finding is that same-domain generalization emerges: P(shared) rises for high-match pairs and falls for low-match pairs, with the effect spreading from the focal topic to same-domain questions. Dashed lines show human P(shared) judgments for comparison.
 
@@ -806,7 +596,7 @@ finally:
     os.unlink(r_script_path)
 ```
 
-## 6. Summary Statistics
+## 5. Summary Statistics
 
 ```{python}
 print('=== Key Results Summary (no-chat condition) ===\n')
