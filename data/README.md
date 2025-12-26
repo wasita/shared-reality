@@ -56,8 +56,5 @@ Conversation transcripts from the chat condition.
 | `matched_question` | Text of discussed question |
 | `start_time` | Conversation start time |
 
-### `fitted_params.json`
-Cached model parameters from grid search optimization.
-
 ### `llm_results/`
 Pre-computed LLM (Gemini) prediction results for supplementary analyses.
