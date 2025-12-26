@@ -573,12 +573,12 @@ print(f'z = {z_score:.2f}, p < .001')
 
 ## Question Property Norms {#sec-norms}
 
-To characterize the stimulus set, an independent sample (N = 15–27 per dimension) rated each question on several dimensions: how personally revealing, how divisive or controversial, how deep, how much one would learn from the answer, and expected population agreement. Ratings were made on 0–100 scales.
+To characterize the stimulus set, an independent sample (N = 15–27 per dimension) rated each question on several dimensions: how personally revealing, how self-relevant, how divisive or controversial, how deep, how much one would learn from the answer, how interesting, how likely one would discuss the topic, and expected population agreement. Ratings were made on 0–100 scales.
 
 ```{python}
 #| label: fig-norms
 #| fig-cap: "Normative ratings of question properties by domain. Cells show mean ratings (0–100 scale) across questions within each domain. Domains are sorted by mean personal informativeness rating."
-#| fig-width: 7
+#| fig-width: 10
 #| fig-height: 5
 
 # Re-import after R chunks (reticulate loses Python state)
@@ -597,12 +597,12 @@ data_dir = base_dir / 'data'
 questions = pd.read_csv(data_dir / 'questions.csv')
 
 # Compute domain-level means
-norm_cols = ['norm_personal', 'norm_divisive', 'norm_deep', 'norm_learn', 'norm_same']
+norm_cols = ['norm_personal', 'norm_relevant', 'norm_divisive', 'norm_deep', 'norm_learn', 'norm_interest', 'norm_likely', 'norm_same']
 domain_norms = questions.groupby('domain')[norm_cols].mean()
 
 # Rename for display
 domain_norms.index = domain_norms.index.str.replace('arbitrary', 'Lifestyle').str.capitalize()
-domain_norms.columns = ['Personal', 'Divisive', 'Deep', 'Learn', 'Exp. Agreement']
+domain_norms.columns = ['Personal', 'Relevant', 'Divisive', 'Deep', 'Learn', 'Interest', 'Likely', 'Agreement']
 
 # Sort by Personal (most theoretically relevant)
 domain_norms = domain_norms.sort_values('Personal', ascending=False)
