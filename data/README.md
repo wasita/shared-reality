@@ -40,7 +40,7 @@ Main behavioral data with participant survey responses and predictions.
 | `matchedDomain` | Domain of the matched question |
 | `matchedQuestion` | Text of the matched question |
 | `matchedTolerance` | Tolerance used for high/low matching |
-| `srgiResponse` | Self-reported group identification (SRGI) scale response |
+| `srgiResponse` | Interaction-specific Generalized Shared Reality (SR-G) scale response (Rossignac-Milon et al., 2021) |
 | `participant_binary_prediction` | Same as `predictShared` (derived column) |
 | `match_type` | Same as `matchType` (lowercase, derived) |
 | `is_matched` | Boolean: is this the matched/discussed question? |

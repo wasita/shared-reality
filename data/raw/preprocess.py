@@ -20,8 +20,8 @@ No-chat condition:
 Question metadata:
   - question-table.csv
 
-SRGI scores:
-  - srgi-composite-scores.csv (Self-Reported Group Identification scale)
+SR-G scores:
+  - srgi-composite-scores.csv (Interaction-specific Generalized Shared Reality; Rossignac-Milon et al., 2021)
 
 MANUAL DATA FIXES
 =================
