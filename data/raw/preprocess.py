@@ -20,6 +20,9 @@ No-chat condition:
 Question metadata:
   - question-table.csv
 
+SRGI scores:
+  - srgi-composite-scores.csv (Self-Reported Group Identification scale)
+
 MANUAL DATA FIXES
 =================
 The following fix was applied in pull_data_from_firebase.ipynb and is reflected
@@ -158,6 +161,48 @@ def compute_question_type(row):
         return 'diff_domain'
 
 
+def load_srgi_scores():
+    """Load SRGI composite scores."""
+    srgi = pd.read_csv(RAW_DIR / "srgi-composite-scores.csv")
+    return srgi
+
+
+def compute_partner_responses(chat_df):
+    """
+    Compute partner's actual response on each question for chat participants.
+
+    For each participant, find their partner in the same group and get the
+    partner's preChatResponse for each question.
+    """
+    # Create a lookup of pid -> preChatResponse for each question
+    response_lookup = chat_df.set_index(['groupId', 'pid', 'question'])['preChatResponse'].to_dict()
+
+    # For each group, find the two participants
+    group_partners = {}
+    for group_id in chat_df['groupId'].unique():
+        pids = chat_df[chat_df['groupId'] == group_id]['pid'].unique()
+        if len(pids) == 2:
+            group_partners[group_id] = {pids[0]: pids[1], pids[1]: pids[0]}
+
+    def get_partner_response(row):
+        group_id = row['groupId']
+        pid = row['pid']
+        question = row['question']
+
+        if group_id not in group_partners:
+            return np.nan
+        if pid not in group_partners[group_id]:
+            return np.nan
+
+        partner_pid = group_partners[group_id][pid]
+        key = (group_id, partner_pid, question)
+        return response_lookup.get(key, np.nan)
+
+    chat_df = chat_df.copy()
+    chat_df['partner_response'] = chat_df.apply(get_partner_response, axis=1)
+    return chat_df
+
+
 def create_responses_csv(chat_df, nochat_df):
     """Combine and format data for analysis."""
 
@@ -169,12 +214,13 @@ def create_responses_csv(chat_df, nochat_df):
         'matchedTolerance', 'experiment'
     ]
 
-    # Chat has groupId
-    chat_subset = chat_df[cols + ['groupId']].copy()
+    # Chat has groupId and partner_response
+    chat_subset = chat_df[cols + ['groupId', 'partner_response']].copy()
 
-    # No-chat needs empty groupId
+    # No-chat needs empty groupId and NaN partner_response
     nochat_subset = nochat_df[cols].copy()
     nochat_subset['groupId'] = ''
+    nochat_subset['partner_response'] = np.nan
 
     # Combine
     combined = pd.concat([chat_subset, nochat_subset], ignore_index=True)
@@ -182,7 +228,18 @@ def create_responses_csv(chat_df, nochat_df):
     # Add derived columns
     combined['question_type'] = combined.apply(compute_question_type, axis=1)
     combined['is_matched'] = combined['question'] == combined['matchedIdx']
-    combined['domain_cap'] = combined['matchedDomain'].map(DOMAIN_MAP)
+
+    # Compatibility columns (same data, different names for legacy code)
+    combined['participant_binary_prediction'] = combined['predictShared']
+    combined['match_type'] = combined['matchType'].str.lower()
+
+    # Join SRGI scores
+    srgi = load_srgi_scores()
+    combined = combined.merge(
+        srgi[['pid', 'experiment', 'matchType', 'srgiResponse']],
+        on=['pid', 'experiment', 'matchType'],
+        how='left'
+    )
 
     return combined
 
@@ -195,6 +252,10 @@ def validate(df):
     if nan_tol > 0:
         print(f"WARNING: {nan_tol} rows have NaN matchedTolerance")
 
+    nan_srgi = df['srgiResponse'].isna().sum()
+    if nan_srgi > 0:
+        print(f"Note: {nan_srgi} rows have NaN srgiResponse (expected for some no-chat)")
+
     # Summary stats
     chat_n = df[df['experiment'] == 'chat']['pid'].nunique()
     nochat_n = df[df['experiment'] == 'no-chat']['pid'].nunique()
@@ -205,10 +266,12 @@ def validate(df):
     print(f"Total participants: {df['pid'].nunique()}")
     print(f"Total rows: {len(df)}")
 
-    # Stance distribution
-    df['stance'] = df['matchedTolerance'].apply(lambda x: 'opposing' if x > 1 else 'shared')
+    # Stance distribution (computed for display, not saved)
+    stance = df['matchedTolerance'].apply(lambda x: 'opposing' if x > 1 else 'shared')
     print(f"\n=== STANCE DISTRIBUTION ===")
-    stance_counts = df.groupby(['experiment', 'stance'])['pid'].nunique()
+    stance_df = df.copy()
+    stance_df['stance'] = stance
+    stance_counts = stance_df.groupby(['experiment', 'stance'])['pid'].nunique()
     print(stance_counts)
 
 
@@ -224,6 +287,9 @@ def main():
     chat_df, nochat_df, log = apply_duplicate_filters(chat_df, nochat_df)
     for entry in log:
         print(f"  {entry}")
+
+    print("\nComputing partner responses for chat participants...")
+    chat_df = compute_partner_responses(chat_df)
 
     print("\nCreating responses.csv...")
     responses_df = create_responses_csv(chat_df, nochat_df)
